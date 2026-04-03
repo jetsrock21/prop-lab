@@ -145,47 +145,69 @@ async def find_bbref_slug(player_id: int, full_name: str, season_year: int) -> s
 
 async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
     """
-    Fetch and parse the basketball-reference game log HTML table.
-    Returns list of row dicts with stat columns.
+    Fetch and parse the basketball-reference game log page.
+    Uses html.parser via stdlib — no extra deps needed.
     """
+    from html.parser import HTMLParser
+
     url = f"https://www.basketball-reference.com/players/{slug[0]}/{slug}/gamelog/{season_year}/"
     async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=20, follow_redirects=True) as client:
         r = await client.get(url)
         r.raise_for_status()
     html = r.text
 
-    # Find table by locating id= attribute directly (table tag spans multiple lines)
-    tbl_id = 'id="player_game_log_reg"'
-    tbl_start = html.find(tbl_id)
-    if tbl_start == -1:
-        return []
+    class GameLogParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_target_table = False
+            self.depth           = 0      # table nesting depth
+            self.in_td           = False
+            self.current_stat    = None
+            self.current_row     = {}
+            self.rows            = []
 
-    # Find the end of this table
-    tbl_end = html.find("</table>", tbl_start)
-    if tbl_end == -1:
-        return []
+        def handle_starttag(self, tag, attrs):
+            attr_dict = dict(attrs)
+            if tag == "table":
+                if attr_dict.get("id") == "player_game_log_reg":
+                    self.in_target_table = True
+                    self.depth = 1
+                elif self.in_target_table:
+                    self.depth += 1
+            elif tag == "tr" and self.in_target_table:
+                self.current_row = {}
+            elif tag == "td" and self.in_target_table:
+                self.current_stat = attr_dict.get("data-stat")
+                self.in_td = True
 
-    table_html = html[tbl_start:tbl_end + 8]
+        def handle_endtag(self, tag):
+            if tag == "table" and self.in_target_table:
+                self.depth -= 1
+                if self.depth == 0:
+                    self.in_target_table = False
+            elif tag == "tr" and self.in_target_table:
+                row = self.current_row
+                if row.get("date_game") and row.get("mp"):
+                    mp = row["mp"].strip()
+                    skip = ("", "Inactive", "Did Not Play", "Did Not Dress",
+                            "Not With Team", "Player Suspended")
+                    if mp not in skip:
+                        self.rows.append(dict(row))
+                self.current_row = {}
+            elif tag == "td" and self.in_target_table:
+                self.in_td = False
+                self.current_stat = None
 
-    # Parse every <tr> and collect cells by data-stat attribute
-    rows = []
-    cell_pat = re.compile(
-        r"""<td[^>]+data-stat=["']([^"']+)["'][^>]*>(.*?)</td>""",
-        re.DOTALL
-    )
-    for tr_match in re.finditer(r"""<tr[^>]*>(.*?)</tr>""", table_html, re.DOTALL):
-        tr_html = tr_match.group(1)
-        row_data = {}
-        for cell in cell_pat.finditer(tr_html):
-            stat = cell.group(1)
-            # Strip all HTML tags from value
-            val = re.sub(r"""<[^>]+>""", "", cell.group(2)).strip()
-            row_data[stat] = val
-        # Only keep rows that have a date and minutes played
-        if row_data.get("date_game") and row_data.get("mp") and row_data["mp"] not in ("", "Inactive", "Did Not Play", "Did Not Dress", "Not With Team"):
-            rows.append(row_data)
+        def handle_data(self, data):
+            if self.in_target_table and self.in_td and self.current_stat:
+                existing = self.current_row.get(self.current_stat, "")
+                self.current_row[self.current_stat] = (existing + data).strip()
 
-    return rows
+    parser = GameLogParser()
+    parser.feed(html)
+    return parser.rows
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 @app.get("/players/search")
 def search_players(q: str = Query(..., min_length=2)):
