@@ -265,7 +265,11 @@ function useNBAData() {
     setLoaded(false);
     try {
       const url = `${API_BASE}/players/${pid}/gamelogs?stat_type=${encodeURIComponent(statType)}&season=${season}${opponent ? "&opponent=" + encodeURIComponent(opponent) : ""}`;
-      const r = await fetch(url);
+      // Use a generous fetch timeout — stats.nba.com can be slow
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 90000); // 90s client timeout
+      const r = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${r.status}`);
@@ -276,7 +280,10 @@ function useNBAData() {
       setLoaded(true);
       return data;
     } catch (e) {
-      setError(e.message || "Failed to load player data");
+      const msg = e.name === "AbortError"
+        ? "Request timed out — stats.nba.com is slow. Click Load again to retry."
+        : (e.message || "Failed to load player data");
+      setError(msg);
       return null;
     } finally {
       setLoading(false);
@@ -2162,9 +2169,13 @@ export default function App(){
                           {/* Status messages */}
                           {nba.error&&(
                             <div style={{color:"#ff7043",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",
-                              padding:"0.4rem 0.6rem",background:"#1a0a08",borderRadius:5,border:"1px solid #3a1a10"}}>
+                              padding:"0.5rem 0.75rem",background:"#1a0a08",borderRadius:5,border:"1px solid #3a1a10",lineHeight:1.6}}>
                               ⚠ {nba.error}
-                              <span style={{color:"#5a4040",marginLeft:"0.5rem"}}>— Is the API server running? (uvicorn prop_lab_api:app)</span>
+                              {(nba.error.toLowerCase().includes("timeout")||nba.error.toLowerCase().includes("timed out")||nba.error.toLowerCase().includes("502"))&&(
+                                <div style={{marginTop:"0.3rem",color:"#ffee58"}}>
+                                  stats.nba.com is slow — click ⬇ Load again to retry.
+                                </div>
+                              )}
                             </div>
                           )}
                           {nba.loaded&&!nba.error&&(
