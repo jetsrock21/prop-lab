@@ -154,44 +154,38 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
         r.raise_for_status()
     html = r.text
 
-    # Find the player_game_log_reg table
-    table_match = re.search(
-        r'<table[^>]+id=["\']player_game_log_reg["\'][^>]*>(.*?)</table>',
-        html, re.DOTALL
-    )
-    if not table_match:
+    # Find table by locating id= attribute directly (table tag spans multiple lines)
+    tbl_id = 'id="player_game_log_reg"'
+    tbl_start = html.find(tbl_id)
+    if tbl_start == -1:
         return []
 
-    table_html = table_match.group(1)
+    # Find the end of this table
+    tbl_end = html.find("</table>", tbl_start)
+    if tbl_end == -1:
+        return []
 
-    # Extract headers
-    header_matches = re.findall(r'<th[^>]+data-stat=["\']([^"\']+)["\'][^>]*>', table_html)
-    # Remove duplicates while preserving order
-    seen = set()
-    headers = []
-    for h in header_matches:
-        if h not in seen:
-            seen.add(h)
-            headers.append(h)
+    table_html = html[tbl_start:tbl_end + 8]
 
-    # Extract data rows (skip header/footer rows)
+    # Parse every <tr> and collect cells by data-stat attribute
     rows = []
-    # Match any <tr> that has a date_game td — more robust than class matching
-    row_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL)
-    cell_pattern = re.compile(r'<td[^>]+data-stat=["\']([^"\']+)["\'][^>]*>(?:<[^>]+>)*([^<]*)(?:<[^>]+>)*</td>')
-
-    for row_match in row_pattern.finditer(table_html):
-        row_html = row_match.group(1)
+    cell_pat = re.compile(
+        r"""<td[^>]+data-stat=["']([^"']+)["'][^>]*>(.*?)</td>""",
+        re.DOTALL
+    )
+    for tr_match in re.finditer(r"""<tr[^>]*>(.*?)</tr>""", table_html, re.DOTALL):
+        tr_html = tr_match.group(1)
         row_data = {}
-        for cell in cell_pattern.finditer(row_html):
-            col  = cell.group(1)
-            val  = cell.group(2).strip()
-            row_data[col] = val
-        if row_data.get("date_game") and row_data.get("mp"):
+        for cell in cell_pat.finditer(tr_html):
+            stat = cell.group(1)
+            # Strip all HTML tags from value
+            val = re.sub(r"""<[^>]+>""", "", cell.group(2)).strip()
+            row_data[stat] = val
+        # Only keep rows that have a date and minutes played
+        if row_data.get("date_game") and row_data.get("mp") and row_data["mp"] not in ("", "Inactive", "Did Not Play", "Did Not Dress", "Not With Team"):
             rows.append(row_data)
 
     return rows
-
 # ── Routes ─────────────────────────────────────────────────────────────────
 @app.get("/players/search")
 def search_players(q: str = Query(..., min_length=2)):
