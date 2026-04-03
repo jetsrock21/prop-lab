@@ -355,4 +355,5 @@ async def debug_player(player_id: int, season: str = Query("2025-26")):
         "rows_parsed": len(rows),
         "first_2_rows": rows[:2] if rows else [],
         "table_snippet": snippet[:300],
+        "all_table_tags": re.findall("<table[^>]*id=[^>]*>", r.text)[:10],
     }
