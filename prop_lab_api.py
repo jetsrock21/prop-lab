@@ -176,7 +176,7 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
                     self.depth += 1
             elif tag == "tr" and self.in_target_table:
                 self.current_row = {}
-            elif tag == "td" and self.in_target_table:
+            elif tag in ("td", "th") and self.in_target_table:
                 self.current_stat = attr_dict.get("data-stat")
                 self.in_td = True
 
@@ -194,7 +194,7 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
                     if mp not in skip:
                         self.rows.append(dict(row))
                 self.current_row = {}
-            elif tag == "td" and self.in_target_table:
+            elif tag in ("td", "th") and self.in_target_table:
                 self.in_td = False
                 self.current_stat = None
 
