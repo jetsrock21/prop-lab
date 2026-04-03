@@ -357,4 +357,8 @@ async def debug_player(player_id: int, season: str = Query("2025-26")):
         "first_2_rows": rows[:2] if rows else [],
         "table_snippet": snippet[:300],
         "all_table_tags": re.findall("<table[^>]*id=[^>]*>", r.text)[:10],
+        "sample_trs": re.findall(r"<tr[^>]*>", r.text)[20:30],
+        "table_html_first_500": (lambda m: m.group(0)[:500] if m else "NO MATCH")(
+            re.search(r'id="player_game_log_reg"[^>]*>(.*?)</table>', r.text, re.DOTALL)
+        ),
     }
