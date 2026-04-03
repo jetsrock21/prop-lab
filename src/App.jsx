@@ -1753,6 +1753,7 @@ export default function App(){
 
   // ── NBA API data loader ──
   const nba = useNBAData();
+  const [gameLimit, setGameLimit] = useState(0); // 0 = load all
 
   // ── DvP matchup auto-fill ──
   const dvp = useDvP();
@@ -1784,17 +1785,36 @@ export default function App(){
     const statType = logForm.statType || "Points";
     const data = await nba.loadData(nba.playerId, nba.playerName, statType);
     if (!data) return;
-    // Fill pasteParsedLogs with the full recent log (newest first)
-    setPasteParsedLogs(data.recent_logs || []);
-    // Fill H2H if opponent is selected
+
+    // Apply game limit (0 = all games)
+    const limit = parseInt(gameLimit) || 0;
+    const allLogs = data.recent_logs || [];
+    const slicedLogs = limit > 0 ? allLogs.slice(0, limit) : allLogs;
+
+    setPasteParsedLogs(slicedLogs);
     if (nba.opponent && data.h2h_logs) setPasteParsedH2H(data.h2h_logs);
-    // Switch to paste sub-tab so logs are immediately active
     setLogSubTab("paste");
-    // Auto-fill player name and L5/L10/L20 summaries into logForm
+
+    // Recalculate window stats from sliced logs if limit applied
+    const calcWindow = (logs, n) => {
+      const w = logs.slice(0, n);
+      if (!w.length) return null;
+      const mins  = w.map(r => parseFloat(r.min) || 0);
+      const stats = w.map(r => parseFloat(r.stat) || 0);
+      const avg  = +(stats.reduce((a,b)=>a+b,0)/stats.length).toFixed(1);
+      const mpg  = +(mins.reduce((a,b)=>a+b,0)/mins.length).toFixed(1);
+      const med  = +([...stats].sort((a,b)=>a-b)[Math.floor(stats.length/2)]).toFixed(1);
+      return { avg, mpg, median: med };
+    };
+
+    const l5  = calcWindow(slicedLogs, 5)  || data.l5;
+    const l10 = calcWindow(slicedLogs, 10) || data.l10;
+    const l20 = calcWindow(slicedLogs, 20) || data.l20;
+
     const updates = { playerName: nba.playerName };
-    if (data.l5)  { updates.l5Avg  = String(data.l5.avg);  updates.l5Mpg  = String(data.l5.mpg);  updates.l5Med  = String(data.l5.median); }
-    if (data.l10) { updates.l10Avg = String(data.l10.avg); updates.l10Mpg = String(data.l10.mpg); updates.l10Med = String(data.l10.median); }
-    if (data.l20) { updates.l20Avg = String(data.l20.avg); updates.l20Mpg = String(data.l20.mpg); updates.l20Med = String(data.l20.median); }
+    if (l5)  { updates.l5Avg  = String(l5.avg);  updates.l5Mpg  = String(l5.mpg);  updates.l5Med  = String(l5.median); }
+    if (l10) { updates.l10Avg = String(l10.avg); updates.l10Mpg = String(l10.mpg); updates.l10Med = String(l10.median); }
+    if (l20) { updates.l20Avg = String(l20.avg); updates.l20Mpg = String(l20.mpg); updates.l20Med = String(l20.median); }
     setLogForm(f => ({ ...f, ...updates }));
   };
 
@@ -2178,23 +2198,92 @@ export default function App(){
 
                           {/* Status messages */}
                           {nba.error&&(
-                            <div style={{color:"#ff7043",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",
-                              padding:"0.5rem 0.75rem",background:"#1a0a08",borderRadius:5,border:"1px solid #3a1a10",lineHeight:1.6}}>
-                              ⚠ {nba.error}
-                              {(nba.error.toLowerCase().includes("timeout")||nba.error.toLowerCase().includes("timed out")||nba.error.toLowerCase().includes("502"))&&(
-                                <div style={{marginTop:"0.3rem",color:"#ffee58"}}>
-                                  stats.nba.com is slow — click ⬇ Load again to retry.
+                            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.68rem",
+                              padding:"0.65rem 0.75rem",background:"#1a0a08",borderRadius:6,border:"1px solid #3a1a10",lineHeight:1.7}}>
+                              {(nba.error.includes("401")||nba.error.toLowerCase().includes("bdl_api_key")||nba.error.toLowerCase().includes("api key"))?(
+                                <div>
+                                  <div style={{color:"#ffee58",fontWeight:600,marginBottom:"0.4rem"}}>⚠ API Key Required</div>
+                                  <div style={{color:"#ff9060"}}>
+                                    1. Go to <span style={{color:"#4a9eff"}}>balldontlie.io</span> → Sign Up (free)<br/>
+                                    2. Copy your API key from the dashboard<br/>
+                                    3. In Railway → your service → <span style={{color:"#4a9eff"}}>Variables</span><br/>
+                                    4. Add: <span style={{color:"#00e676"}}>BDL_API_KEY</span> = your key<br/>
+                                    5. Railway redeploys automatically ✓
+                                  </div>
+                                </div>
+                              ):(
+                                <div style={{color:"#ff7043"}}>
+                                  ⚠ {nba.error}
+                                  {(nba.error.toLowerCase().includes("timeout")||nba.error.toLowerCase().includes("timed out"))&&(
+                                    <div style={{color:"#ffee58",marginTop:"0.3rem"}}>Click ⬇ Load again to retry.</div>
+                                  )}
                                 </div>
                               )}
                             </div>
                           )}
+                          {/* Game limit selector */}
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.65rem",marginTop:"0.65rem"}}>
+                            <div>
+                              <label style={{color:"#4a9eff",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"0.72rem",letterSpacing:"0.1em",textTransform:"uppercase",display:"block",marginBottom:"0.25rem"}}>
+                                Load Last N Games
+                              </label>
+                              <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
+                                <input
+                                  type="number" min="0" max="82" step="1"
+                                  placeholder="All"
+                                  value={gameLimit||""}
+                                  onChange={e=>setGameLimit(parseInt(e.target.value)||0)}
+                                  style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:6,color:"#e8f4fd",padding:"0.5rem 0.65rem",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.9rem",width:"100%",outline:"none"}}
+                                />
+                                {gameLimit>0&&(
+                                  <button onClick={()=>setGameLimit(0)}
+                                    style={{background:"none",border:"none",color:"#3a6080",cursor:"pointer",fontSize:"0.9rem",padding:"0.2rem",flexShrink:0}}>✕</button>
+                                )}
+                              </div>
+                              <div style={{color:"#2a4060",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.58rem",marginTop:"0.2rem"}}>
+                                {gameLimit>0?`Loading last ${gameLimit} games`:"Loading all games this season"}
+                              </div>
+                            </div>
+                            <div style={{display:"flex",alignItems:"flex-end"}}>
+                              <div style={{display:"flex",gap:"0.3rem",flexWrap:"wrap"}}>
+                                {[5,10,15,20].map(n=>(
+                                  <button key={n} onClick={()=>setGameLimit(n)}
+                                    style={{padding:"0.35rem 0.6rem",background:gameLimit===n?"#4a9eff":"#0a1628",color:gameLimit===n?"#050d1a":"#3a6080",border:`1px solid ${gameLimit===n?"#4a9eff":"#1e3a5a"}`,borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.68rem",cursor:"pointer"}}>
+                                    L{n}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
                           {nba.loaded&&!nba.error&&(
-                            <div style={{color:"#00e676",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",
-                              padding:"0.4rem 0.6rem",background:"#0a1a0a",borderRadius:5,border:"1px solid #1a3a1a"}}>
-                              ✓ {pasteParsedLogs.length} games loaded for {nba.playerName}
-                              {pasteParsedH2H.length>0&&` · ${pasteParsedH2H.length} H2H vs ${nba.opponent}`}
-                              {" · "}
-                              <span style={{color:"#3a8060"}}>edit any values below before analyzing</span>
+                            <div style={{marginTop:"0.5rem"}}>
+                              <div style={{color:"#00e676",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",
+                                padding:"0.4rem 0.6rem",background:"#0a1a0a",borderRadius:5,border:"1px solid #1a3a1a",marginBottom:"0.5rem"}}>
+                                ✓ {pasteParsedLogs.length} games loaded for {nba.playerName}
+                                {gameLimit>0&&` (last ${gameLimit})`}
+                                {pasteParsedH2H.length>0&&` · ${pasteParsedH2H.length} H2H vs ${nba.opponent}`}
+                                {" · "}
+                                <span style={{color:"#3a8060"}}>edit any values below before analyzing</span>
+                              </div>
+                              <ParsedPreview
+                                rows={pasteParsedLogs}
+                                label="LOADED GAMES"
+                                statType={logForm.statType||"Points"}
+                                useRecency={useRecency}
+                                decayStrength={decayStrength}
+                              />
+                              {pasteParsedH2H.length>0&&(
+                                <div style={{marginTop:"0.5rem"}}>
+                                  <ParsedPreview
+                                    rows={pasteParsedH2H}
+                                    label="H2H GAMES"
+                                    statType={logForm.statType||"Points"}
+                                    useRecency={useRecency}
+                                    decayStrength={decayStrength}
+                                  />
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
