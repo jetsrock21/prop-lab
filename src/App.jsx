@@ -116,7 +116,10 @@ function computeCeilingScore({ boomPct, p90, propLine, matchupVarFactor, sdRate,
 // NBA API LAYER  (calls prop_lab_api.py backend)
 // Change API_BASE to wherever you run the FastAPI server
 // ═══════════════════════════════════════════════════════════════
-const API_BASE = typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE ? import.meta.env.VITE_API_BASE : "http://localhost:8000";
+const API_BASE = (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE
+  ? import.meta.env.VITE_API_BASE
+  : "http://localhost:8000"
+).replace(/\/+$/, ""); // strip trailing slash so URLs never get double-slash
 
 // ─── Player Autocomplete ──────────────────────────────────────
 function PlayerSearch({ value, onSelect, style: extraStyle = {} }) {
@@ -249,7 +252,10 @@ function useNBAData() {
 
   // Fetch seasons on mount
   useEffect(() => {
-    fetch(`${API_BASE}/seasons`).then(r => r.json()).then(setSeasons).catch(()=>{});
+    fetch(`${API_BASE}/seasons`)
+      .then(r => r.json())
+      .then(data => { if(Array.isArray(data) && data.length > 0) setSeasons(data); })
+      .catch(() => {}); // keep default seasons on any error
   }, []);
 
   const loadData = async (pid, pname, statType) => {
@@ -2114,7 +2120,7 @@ export default function App(){
                               <label style={L}>Season</label>
                               <select style={{...S,width:"auto",minWidth:100,cursor:"pointer"}}
                                 value={nba.season} onChange={e=>nba.setSeason(e.target.value)}>
-                                {nba.seasons.map(s=><option key={s}>{s}</option>)}
+                                {(Array.isArray(nba.seasons)?nba.seasons:[]).map(s=><option key={s}>{s}</option>)}
                               </select>
                             </div>
                           </div>
