@@ -148,8 +148,18 @@ function PlayerSearch({ value, onSelect, style: extraStyle = {} }) {
       setLoading(true);
       try {
         const r = await fetch(`${API_BASE}/players/search?q=${encodeURIComponent(q)}`);
-        if (r.ok) { setResults(await r.json()); setOpen(true); }
-      } catch { setResults([]); }
+        if (r.ok) {
+          const data = await r.json();
+          setResults(Array.isArray(data) ? data : []);
+          setOpen(true);
+        } else {
+          setResults([{ id: null, full_name: `Search error (HTTP ${r.status}) — is backend running?`, is_active: false, _error: true }]);
+          setOpen(true);
+        }
+      } catch(e) {
+        setResults([{ id: null, full_name: `Cannot reach backend — check VITE_API_BASE (${e.message})`, is_active: false, _error: true }]);
+        setOpen(true);
+      }
       setLoading(false);
     }, 280);
   };
@@ -202,9 +212,9 @@ function PlayerSearch({ value, onSelect, style: extraStyle = {} }) {
           background:"#0a1628", border:"1px solid #2a4060", borderRadius:6,
           maxHeight:220, overflowY:"auto", boxShadow:"0 8px 24px #000a",
         }}>
-          {results.map(p => (
-            <div key={p.id}
-              onMouseDown={() => pick(p)}
+          {results.map((p, idx) => (
+            <div key={p.id ?? idx}
+              onMouseDown={() => !p._error && pick(p)}
               style={{
                 padding:"0.45rem 0.75rem", cursor:"pointer",
                 fontFamily:"'JetBrains Mono',monospace", fontSize:"0.82rem",
