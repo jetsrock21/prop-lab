@@ -98,6 +98,12 @@ async def bdl_find_player(full_name: str) -> Optional[int]:
         if k.lower() == full_name.lower():
             return v
 
+    if not BDL_API_KEY:
+        raise Exception(
+            "BDL_API_KEY not set. "
+            "Get a free key at balldontlie.io and add it as a Railway environment variable."
+        )
+
     parts = full_name.strip().split()
     search_q = parts[-1] if parts else full_name  # search by last name
     async with httpx.AsyncClient(timeout=10) as client:
@@ -106,6 +112,11 @@ async def bdl_find_player(full_name: str) -> Optional[int]:
             params={"search": search_q, "per_page": 25},
             headers=bdl_headers(),
         )
+        if r.status_code == 401:
+            raise Exception(
+                "BDL_API_KEY is invalid or missing. "
+                "Set BDL_API_KEY in Railway → Variables."
+            )
         r.raise_for_status()
         data = r.json()
 
@@ -228,8 +239,13 @@ async def get_gamelogs(
         if e.response.status_code == 401:
             raise HTTPException(
                 status_code=401,
-                detail="balldontlie API key missing or invalid. "
-                       "Get a free key at balldontlie.io and set BDL_API_KEY in Railway."
+                detail=(
+                    "BDL_API_KEY is missing or invalid. "
+                    "1) Go to balldontlie.io and sign up for a free account. "
+                    "2) Copy your API key. "
+                    "3) In Railway: go to your service → Variables → add BDL_API_KEY = your_key. "
+                    "4) Railway will redeploy automatically."
+                )
             )
         raise HTTPException(status_code=502, detail=f"balldontlie error: {e}")
     except Exception as e:
@@ -309,4 +325,20 @@ async def get_dvp(position: str = Query("SG"), season: str = Query("2025-26")):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "bdl_key_set": bool(BDL_API_KEY)}
+    key = BDL_API_KEY
+    return {
+        "status": "ok",
+        "bdl_key_set": bool(key),
+        "bdl_key_prefix": key[:8] + "..." if key and len(key) > 8 else "NOT SET",
+    }
+
+
+@app.get("/debug-env")
+def debug_env():
+    """Check all env vars are loading correctly."""
+    key = os.environ.get("BDL_API_KEY", "")
+    return {
+        "BDL_API_KEY_set": bool(key),
+        "BDL_API_KEY_prefix": key[:8] + "..." if key else "NOT SET",
+        "all_env_keys": [k for k in os.environ.keys() if "BDL" in k or "KEY" in k],
+    }
