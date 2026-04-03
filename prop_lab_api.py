@@ -154,9 +154,9 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
         r.raise_for_status()
     html = r.text
 
-    # Find the pgl_basic table
+    # Find the player_game_log_reg table
     table_match = re.search(
-        r'<table[^>]+id=["\']pgl_basic["\'][^>]*>(.*?)</table>',
+        r'<table[^>]+id=["\']player_game_log_reg["\'][^>]*>(.*?)</table>',
         html, re.DOTALL
     )
     if not table_match:
@@ -176,7 +176,8 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
 
     # Extract data rows (skip header/footer rows)
     rows = []
-    row_pattern = re.compile(r'<tr[^>]*class=["\'][^"\']*(?:full_table)[^"\']*["\'][^>]*>(.*?)</tr>', re.DOTALL)
+    # Match any <tr> that has a date_game td — more robust than class matching
+    row_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL)
     cell_pattern = re.compile(r'<td[^>]+data-stat=["\']([^"\']+)["\'][^>]*>(?:<[^>]+>)*([^<]*)(?:<[^>]+>)*</td>')
 
     for row_match in row_pattern.finditer(table_html):
@@ -335,10 +336,10 @@ async def debug_player(player_id: int, season: str = Query("2025-26")):
             r = await client.get(url)
             status = r.status_code
             html_len = len(r.text)
-            # Check if pgl_basic table exists
-            has_table = "pgl_basic" in r.text
-            # Get first 500 chars after pgl_basic
-            idx = r.text.find("pgl_basic")
+            # Check if player_game_log_reg table exists
+            has_table = "player_game_log_reg" in r.text
+            # Get first 500 chars after player_game_log_reg
+            idx = r.text.find("player_game_log_reg")
             snippet = r.text[idx:idx+300] if idx >= 0 else "NOT FOUND"
             # Try parsing
             rows = await fetch_bbref_gamelog(slug, season_year)
@@ -351,7 +352,7 @@ async def debug_player(player_id: int, season: str = Query("2025-26")):
         "url": url,
         "http_status": status,
         "html_length": html_len,
-        "has_pgl_basic_table": has_table,
+        "has_gamelog_table": has_table,
         "rows_parsed": len(rows),
         "first_2_rows": rows[:2] if rows else [],
         "table_snippet": snippet[:300],
