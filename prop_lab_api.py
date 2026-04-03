@@ -328,7 +328,12 @@ async def get_dvp(position: str = Query("SG"), season: str = Query("2025-26")):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "parser": "HTMLParser-v3"}
+
+
+@app.get("/debug/version")
+def version():
+    return {"version": "HTMLParser-v3", "uses_gamelog_parser": True}
 
 
 @app.get("/debug/player/{player_id}")
