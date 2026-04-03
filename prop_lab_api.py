@@ -1,16 +1,15 @@
 """
 PropLab NBA API Backend
-Run: uvicorn prop_lab_api:app --reload --port 8000
 Install: pip install fastapi uvicorn httpx nba_api
+Run: uvicorn prop_lab_api:app --reload --port 8000
 
-DATA SOURCE: balldontlie.io (server-friendly, no IP blocking)
-Get a FREE API key at https://www.balldontlie.io → Sign Up
-Set it as Railway environment variable: BDL_API_KEY=your_key_here
+Scrapes basketball-reference.com for game logs — works from any server,
+no API key needed, no IP blocking.
 """
 
-import os
 import re
 import threading
+import asyncio
 from typing import Optional
 
 import httpx
@@ -19,32 +18,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from nba_api.stats.static import players as nba_players
 
 app = FastAPI(title="PropLab NBA API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── balldontlie.io config ─────────────────────────────────────────
-BDL_BASE    = "https://api.balldontlie.io/v1"
-BDL_API_KEY = os.environ.get("BDL_API_KEY", "")   # set in Railway env vars
-
-def bdl_headers():
-    h = {"Accept": "application/json"}
-    if BDL_API_KEY:
-        h["Authorization"] = BDL_API_KEY
-    return h
-
-# ── Caches ────────────────────────────────────────────────────────
-_player_cache  = None           # nba_api static list
+# ── Caches ─────────────────────────────────────────────────────────────────
+_player_cache  = None
 _player_lock   = threading.Lock()
-_bdl_id_cache  = {}             # nba_api_id → balldontlie_id
-_gamelog_cache = {}             # (bdl_player_id, season_year) → raw stat rows
+_gamelog_cache = {}   # (player_id, season) → processed logs
 _gamelog_lock  = threading.Lock()
+_slug_cache    = {}   # player_id → bbref slug
 
-# ── Static player list from nba_api bundled JSON (no network) ────
+BBREF_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+# ── Static player list ─────────────────────────────────────────────────────
 def get_all_players():
     global _player_cache
     if _player_cache is not None:
@@ -54,7 +43,7 @@ def get_all_players():
             _player_cache = nba_players.get_players()
     return _player_cache
 
-# ── Helpers ───────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
 def parse_min(v) -> float:
     if not v: return 0.0
     s = str(v).strip()
@@ -62,21 +51,6 @@ def parse_min(v) -> float:
     if m: return int(m.group(1)) + int(m.group(2)) / 60
     try: return float(s)
     except: return 0.0
-
-def compute_stat(row: dict, stat_type: str) -> float:
-    g = lambda k: float(row.get(k) or 0)
-    pts, reb, ast = g("pts"), g("reb"), g("ast")
-    if stat_type == "Points":     return pts
-    if stat_type == "Rebounds":   return reb
-    if stat_type == "Assists":    return ast
-    if stat_type == "3-Pointers": return g("fg3m")
-    if stat_type == "Blocks":     return g("blk")
-    if stat_type == "Steals":     return g("stl")
-    if stat_type == "PRA":        return pts + reb + ast
-    if stat_type == "PR":         return pts + reb
-    if stat_type == "PA":         return pts + ast
-    if stat_type == "RA":         return reb + ast
-    return 0.0
 
 def window_stats(logs, n):
     w = logs[:n]
@@ -90,103 +64,138 @@ def window_stats(logs, n):
         "n":      len(w),
     }
 
-# ── balldontlie: find player ID by name ──────────────────────────
-async def bdl_find_player(full_name: str) -> Optional[int]:
-    """Search balldontlie for a player and return their bdl ID."""
-    # Check cache first
-    for k, v in _bdl_id_cache.items():
-        if k.lower() == full_name.lower():
-            return v
+def stat_col_name(stat_type: str) -> str:
+    """Map stat type to basketball-reference table column header."""
+    return {
+        "Points":     "PTS",
+        "Rebounds":   "TRB",
+        "Assists":    "AST",
+        "3-Pointers": "3P",
+        "Blocks":     "BLK",
+        "Steals":     "STL",
+        "PRA":        "_PRA",   # computed
+        "PR":         "_PR",
+        "PA":         "_PA",
+        "RA":         "_RA",
+    }.get(stat_type, "PTS")
 
-    if not BDL_API_KEY:
-        raise Exception(
-            "BDL_API_KEY not set. "
-            "Get a free key at balldontlie.io and add it as a Railway environment variable."
-        )
+def extract_stat(row_data: dict, stat_type: str) -> float:
+    g = lambda k: float(row_data.get(k) or 0)
+    pts = g("PTS"); reb = g("TRB"); ast = g("AST")
+    if stat_type == "Points":     return pts
+    if stat_type == "Rebounds":   return reb
+    if stat_type == "Assists":    return ast
+    if stat_type == "3-Pointers": return g("3P")
+    if stat_type == "Blocks":     return g("BLK")
+    if stat_type == "Steals":     return g("STL")
+    if stat_type == "PRA":        return pts + reb + ast
+    if stat_type == "PR":         return pts + reb
+    if stat_type == "PA":         return pts + ast
+    if stat_type == "RA":         return reb + ast
+    return pts
 
+# ── Basketball-reference slug lookup ──────────────────────────────────────
+def make_bbref_slug(full_name: str) -> str:
+    """Generate basketball-reference player slug from full name."""
     parts = full_name.strip().split()
-    search_q = parts[-1] if parts else full_name  # search by last name
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(
-            f"{BDL_BASE}/players",
-            params={"search": search_q, "per_page": 25},
-            headers=bdl_headers(),
+    if len(parts) < 2:
+        return ""
+    first = re.sub(r'[^a-z]', '', parts[0].lower())
+    last  = re.sub(r'[^a-z]', '', ' '.join(parts[1:]).lower())
+    # bbref format: first 5 of last + first 2 of first + 01
+    slug = (last[:5] + first[:2] + "01").lower()
+    return slug
+
+async def find_bbref_slug(player_id: int, full_name: str, season_year: int) -> str:
+    """Try generated slug, fall back to search if 404."""
+    if player_id in _slug_cache:
+        return _slug_cache[player_id]
+
+    slug = make_bbref_slug(full_name)
+    url  = f"https://www.basketball-reference.com/players/{slug[0]}/{slug}/gamelog/{season_year}/"
+
+    async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=15, follow_redirects=True) as client:
+        r = await client.get(url)
+        if r.status_code == 200:
+            _slug_cache[player_id] = slug
+            return slug
+
+        # Try slug with "02" suffix (duplicate names)
+        slug2 = slug[:-2] + "02"
+        r2 = await client.get(
+            f"https://www.basketball-reference.com/players/{slug2[0]}/{slug2}/gamelog/{season_year}/"
         )
-        if r.status_code == 401:
-            raise Exception(
-                "BDL_API_KEY is invalid or missing. "
-                "Set BDL_API_KEY in Railway → Variables."
-            )
+        if r2.status_code == 200:
+            _slug_cache[player_id] = slug2
+            return slug2
+
+        # Fall back to search
+        r3 = await client.get(
+            "https://www.basketball-reference.com/search/search.fcgi",
+            params={"search": full_name}
+        )
+        # Extract first player link from search results
+        match = re.search(r'/players/\w/(\w+)\.html', r3.text)
+        if match:
+            found = match.group(1)
+            _slug_cache[player_id] = found
+            return found
+
+    return ""
+
+async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
+    """
+    Fetch and parse the basketball-reference game log HTML table.
+    Returns list of row dicts with stat columns.
+    """
+    url = f"https://www.basketball-reference.com/players/{slug[0]}/{slug}/gamelog/{season_year}/"
+    async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=20, follow_redirects=True) as client:
+        r = await client.get(url)
         r.raise_for_status()
-        data = r.json()
+    html = r.text
 
-    # Find exact match
-    for p in data.get("data", []):
-        bdl_full = f"{p['first_name']} {p['last_name']}"
-        if bdl_full.lower() == full_name.lower():
-            _bdl_id_cache[full_name] = p["id"]
-            return p["id"]
-    # Fallback: first result
-    if data.get("data"):
-        p = data["data"][0]
-        _bdl_id_cache[full_name] = p["id"]
-        return p["id"]
-    return None
+    # Find the pgl_basic table
+    table_match = re.search(
+        r'<table[^>]+id=["\']pgl_basic["\'][^>]*>(.*?)</table>',
+        html, re.DOTALL
+    )
+    if not table_match:
+        return []
 
-# ── balldontlie: fetch all game stats for a season ───────────────
-async def bdl_fetch_gamelogs(bdl_player_id: int, season_year: int) -> list:
-    """
-    Fetch all per-game stats for a player in a season from balldontlie.
-    Handles pagination automatically.
-    """
-    cache_key = (bdl_player_id, season_year)
-    with _gamelog_lock:
-        if cache_key in _gamelog_cache:
-            return _gamelog_cache[cache_key]
+    table_html = table_match.group(1)
 
-    all_stats = []
-    cursor    = None
+    # Extract headers
+    header_matches = re.findall(r'<th[^>]+data-stat=["\']([^"\']+)["\'][^>]*>', table_html)
+    # Remove duplicates while preserving order
+    seen = set()
+    headers = []
+    for h in header_matches:
+        if h not in seen:
+            seen.add(h)
+            headers.append(h)
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        while True:
-            params = {
-                "player_ids[]": bdl_player_id,
-                "seasons[]":    season_year,
-                "per_page":     100,
-            }
-            if cursor:
-                params["cursor"] = cursor
+    # Extract data rows (skip header/footer rows)
+    rows = []
+    row_pattern = re.compile(r'<tr[^>]*class=["\'][^"\']*(?:full_table)[^"\']*["\'][^>]*>(.*?)</tr>', re.DOTALL)
+    cell_pattern = re.compile(r'<td[^>]+data-stat=["\']([^"\']+)["\'][^>]*>(?:<[^>]+>)*([^<]*)(?:<[^>]+>)*</td>')
 
-            r = await client.get(
-                f"{BDL_BASE}/stats",
-                params=params,
-                headers=bdl_headers(),
-            )
-            r.raise_for_status()
-            data = r.json()
+    for row_match in row_pattern.finditer(table_html):
+        row_html = row_match.group(1)
+        row_data = {}
+        for cell in cell_pattern.finditer(row_html):
+            col  = cell.group(1)
+            val  = cell.group(2).strip()
+            row_data[col] = val
+        if row_data.get("date_game") and row_data.get("mp"):
+            rows.append(row_data)
 
-            all_stats.extend(data.get("data", []))
+    return rows
 
-            # Pagination
-            meta   = data.get("meta", {})
-            cursor = meta.get("next_cursor")
-            if not cursor:
-                break
-
-    # Sort newest first (balldontlie returns oldest first)
-    all_stats.sort(key=lambda x: x.get("date", ""), reverse=True)
-
-    with _gamelog_lock:
-        _gamelog_cache[cache_key] = all_stats
-    return all_stats
-
-# ── Routes ────────────────────────────────────────────────────────
-
+# ── Routes ─────────────────────────────────────────────────────────────────
 @app.get("/players/search")
 def search_players(q: str = Query(..., min_length=2)):
-    """Uses nba_api bundled static JSON — instant, no network call."""
     q_lower = q.lower().strip()
-    all_p   = get_all_players()
+    all_p = get_all_players()
     matches = [
         {"id": p["id"], "full_name": p["full_name"], "is_active": p["is_active"]}
         for p in all_p if q_lower in p["full_name"].lower()
@@ -197,91 +206,68 @@ def search_players(q: str = Query(..., min_length=2)):
 
 @app.get("/players/{player_id}/gamelogs")
 async def get_gamelogs(
-    player_id: int,          # this is the nba_api / NBA official ID
-    stat_type: str  = Query("Points"),
-    season:    str  = Query("2025-26"),
+    player_id: int,
+    stat_type: str = Query("Points"),
+    season:    str = Query("2025-26"),
     opponent:  Optional[str] = Query(None),
 ):
-    """
-    Fetches game logs from balldontlie.io — works from cloud servers.
-    Steps: 1) find player name from static list, 2) find bdl ID by name,
-           3) fetch stats for the season year.
-    """
-    # 1. Get player name from static list
-    all_p = get_all_players()
-    player = next((p for p in all_p if p["id"] == player_id), None)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found in static list.")
+    # Check cache
+    cache_key = (player_id, season)
+    with _gamelog_lock:
+        cached = _gamelog_cache.get(cache_key)
+    if cached is not None:
+        raw_rows = cached
+    else:
+        # Get player name
+        all_p  = get_all_players()
+        player = next((p for p in all_p if p["id"] == player_id), None)
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found.")
 
-    # 2. Convert season "2025-26" → year 2025 (bdl uses start year)
-    try:
-        season_year = int(season.split("-")[0])
-    except Exception:
-        season_year = 2025
+        # Season year: "2025-26" → 2026 (bbref uses END year)
+        try:
+            season_year = int(season.split("-")[0]) + 1
+        except Exception:
+            season_year = 2026
 
-    # 3. Find balldontlie player ID
-    try:
-        bdl_id = await bdl_find_player(player["full_name"])
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not find player on balldontlie: {e}")
+        # Find bbref slug
+        try:
+            slug = await find_bbref_slug(player_id, player["full_name"], season_year)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Could not find player on basketball-reference: {e}")
 
-    if not bdl_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"'{player['full_name']}' not found on balldontlie.io. "
-                   f"Try searching a different spelling."
-        )
-
-    # 4. Fetch game stats
-    try:
-        raw_stats = await bdl_fetch_gamelogs(bdl_id, season_year)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
+        if not slug:
             raise HTTPException(
-                status_code=401,
-                detail=(
-                    "BDL_API_KEY is missing or invalid. "
-                    "1) Go to balldontlie.io and sign up for a free account. "
-                    "2) Copy your API key. "
-                    "3) In Railway: go to your service → Variables → add BDL_API_KEY = your_key. "
-                    "4) Railway will redeploy automatically."
-                )
+                status_code=404,
+                detail=f"Could not find '{player['full_name']}' on basketball-reference.com."
             )
-        raise HTTPException(status_code=502, detail=f"balldontlie error: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch game logs: {e}")
 
-    if not raw_stats:
-        raise HTTPException(
-            status_code=404,
-            detail="No games found — player may not have played this season yet."
-        )
+        # Fetch game log
+        try:
+            raw_rows = await fetch_bbref_gamelog(slug, season_year)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Failed to load game log: {e}")
 
-    # 5. Process into our format
+        if not raw_rows:
+            raise HTTPException(
+                status_code=404,
+                detail="No games found — player may not have played this season yet."
+            )
+
+        with _gamelog_lock:
+            _gamelog_cache[cache_key] = raw_rows
+
+    # Process rows with requested stat type
     logs = []
-    for row in raw_stats:
-        min_val = parse_min(row.get("min"))
+    for row in raw_rows:
+        min_val  = parse_min(row.get("mp", ""))
         if min_val < 1:
             continue
-        stat_val = compute_stat(row, stat_type)
-
-        # Get opponent abbreviation from the game object
-        game = row.get("game", {})
-        team_abbr = (row.get("team") or {}).get("abbreviation", "")
-        home_abbr = (game.get("home_team") or {}).get("abbreviation", "")
-        away_abbr = (game.get("visitor_team") or {}).get("abbreviation", "")
-        # Opponent is whichever team the player is NOT on
-        if team_abbr == home_abbr:
-            opp = away_abbr
-        else:
-            opp = home_abbr
-
-        logs.append({
-            "date": row.get("date", "")[:10],
-            "min":  round(min_val, 1),
-            "stat": round(stat_val, 1),
-            "opponent": opp,
-        })
+        stat_val = extract_stat(row, stat_type)
+        matchup  = row.get("opp_id", "") or row.get("game_location", "")
+        opp      = row.get("opp_id", "").strip()
+        date     = row.get("date_game", "")[:10]
+        logs.append({"date": date, "min": round(min_val, 1), "stat": round(stat_val, 1), "opponent": opp})
 
     # H2H filter
     h2h = []
@@ -325,20 +311,4 @@ async def get_dvp(position: str = Query("SG"), season: str = Query("2025-26")):
 
 @app.get("/health")
 def health():
-    key = BDL_API_KEY
-    return {
-        "status": "ok",
-        "bdl_key_set": bool(key),
-        "bdl_key_prefix": key[:8] + "..." if key and len(key) > 8 else "NOT SET",
-    }
-
-
-@app.get("/debug-env")
-def debug_env():
-    """Check all env vars are loading correctly."""
-    key = os.environ.get("BDL_API_KEY", "")
-    return {
-        "BDL_API_KEY_set": bool(key),
-        "BDL_API_KEY_prefix": key[:8] + "..." if key else "NOT SET",
-        "all_env_keys": [k for k in os.environ.keys() if "BDL" in k or "KEY" in k],
-    }
+    return {"status": "ok"}
