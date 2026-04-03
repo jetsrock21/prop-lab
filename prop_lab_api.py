@@ -1,9 +1,7 @@
 """
 PropLab NBA API Backend
 Run: uvicorn prop_lab_api:app --reload --port 8000
-Install: pip install fastapi uvicorn httpx
-NOTE: Does NOT use nba_api library — calls stats.nba.com directly via httpx
-      to avoid cloud IP blocking issues.
+Install: pip install fastapi uvicorn httpx nba_api
 """
 
 from fastapi import FastAPI, Query, HTTPException
@@ -12,6 +10,9 @@ from typing import Optional
 import re
 import threading
 import httpx
+
+# nba_api.stats.static uses a LOCAL bundled JSON file — no network call, always fast
+from nba_api.stats.static import players as nba_players
 
 app = FastAPI(title="PropLab NBA API")
 
@@ -22,30 +23,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Cache ────────────────────────────────────────────────────────
-_gamelog_cache = {}
-_gamelog_lock  = threading.Lock()
-_player_cache  = None
-_player_lock   = threading.Lock()
+# ── Static player list (loaded once from bundled JSON, no network) ────────────
+_ALL_PLAYERS = None
+_PLAYER_LOCK  = threading.Lock()
 
-# ── Headers that stats.nba.com requires ─────────────────────────
+def get_all_players():
+    global _ALL_PLAYERS
+    if _ALL_PLAYERS is not None:
+        return _ALL_PLAYERS
+    with _PLAYER_LOCK:
+        if _ALL_PLAYERS is None:
+            _ALL_PLAYERS = nba_players.get_players()
+    return _ALL_PLAYERS
+
+# ── Game log cache ────────────────────────────────────────────────────────────
+_GAMELOG_CACHE = {}
+_GAMELOG_LOCK  = threading.Lock()
+
+# ── Headers required by stats.nba.com ────────────────────────────────────────
 NBA_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Referer":             "https://www.nba.com/",
-    "Origin":              "https://www.nba.com",
-    "Accept":              "application/json, text/plain, */*",
-    "Accept-Language":     "en-US,en;q=0.9",
-    "Accept-Encoding":     "gzip, deflate, br",
-    "x-nba-stats-origin":  "stats",
-    "x-nba-stats-token":   "true",
-    "Connection":          "keep-alive",
+    "Referer":            "https://www.nba.com/",
+    "Origin":             "https://www.nba.com",
+    "Accept":             "application/json, text/plain, */*",
+    "Accept-Language":    "en-US,en;q=0.9",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token":  "true",
+    "Connection":         "keep-alive",
 }
 
-# ── Stat helpers ─────────────────────────────────────────────────
+# ── Stat helpers ──────────────────────────────────────────────────────────────
 def compute_stat(row: dict, stat_type: str) -> float:
     g = lambda k: float(row.get(k) or 0)
     pts, reb, ast = g("PTS"), g("REB"), g("AST")
@@ -81,52 +92,8 @@ def window_stats(logs, n):
         "n":      len(w),
     }
 
-# ── Direct stats.nba.com calls via httpx ────────────────────────
-
-async def fetch_player_list() -> list:
-    """Fetch all NBA players from stats.nba.com."""
-    global _player_cache
-    with _player_lock:
-        if _player_cache is not None:
-            return _player_cache
-
-    url = "https://stats.nba.com/stats/commonallplayers"
-    params = {
-        "LeagueID": "00",
-        "Season": "2025-26",
-        "IsOnlyCurrentSeason": "0",
-    }
-    async with httpx.AsyncClient(headers=NBA_HEADERS, timeout=20, follow_redirects=True) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
-
-    headers = data["resultSets"][0]["headers"]
-    rows    = data["resultSets"][0]["rowSet"]
-    pid_i   = headers.index("PERSON_ID")
-    name_i  = headers.index("DISPLAY_FIRST_LAST")
-    # active flag: ROSTERSTATUS 1 = active
-    try:    active_i = headers.index("ROSTERSTATUS")
-    except: active_i = None
-
-    players = []
-    for row in rows:
-        players.append({
-            "id":        row[pid_i],
-            "full_name": row[name_i],
-            "is_active": bool(row[active_i]) if active_i is not None else True,
-        })
-
-    with _player_lock:
-        _player_cache = players
-    return players
-
-
+# ── Direct stats.nba.com game log fetch ──────────────────────────────────────
 async def fetch_gamelogs_direct(player_id: int, season: str) -> list:
-    """
-    Call stats.nba.com/stats/playergamelog directly.
-    Returns the raw rowSet list.
-    """
     url = "https://stats.nba.com/stats/playergamelog"
     params = {
         "PlayerID":   player_id,
@@ -134,31 +101,30 @@ async def fetch_gamelogs_direct(player_id: int, season: str) -> list:
         "SeasonType": "Regular Season",
         "LeagueID":   "00",
     }
-    async with httpx.AsyncClient(headers=NBA_HEADERS, timeout=25, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        headers=NBA_HEADERS, timeout=30, follow_redirects=True
+    ) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
         data = r.json()
 
-    result = data["resultSets"][0]
+    result      = data["resultSets"][0]
     col_headers = result["headers"]
     rows        = result["rowSet"]
-
-    # Convert to list of dicts
     return [dict(zip(col_headers, row)) for row in rows]
 
-
-# ── Routes ───────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/players/search")
-async def search_players(q: str = Query(..., min_length=2)):
+def search_players(q: str = Query(..., min_length=2)):
+    """
+    Search using nba_api's BUNDLED static JSON — no network call, always instant.
+    """
     q_lower = q.lower().strip()
-    try:
-        all_players = await fetch_player_list()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not load player list: {e}")
-
+    all_p   = get_all_players()
     matches = [
-        p for p in all_players
+        {"id": p["id"], "full_name": p["full_name"], "is_active": p["is_active"]}
+        for p in all_p
         if q_lower in p["full_name"].lower()
     ]
     matches.sort(key=lambda x: (not x["is_active"], x["full_name"]))
@@ -172,57 +138,55 @@ async def get_gamelogs(
     season:    str = Query("2025-26"),
     opponent:  Optional[str] = Query(None),
 ):
-    # ── Cache hit ────────────────────────────────────────────────
+    # Cache by player + season (stat_type filtering done in memory)
     cache_key = (player_id, season)
-    with _gamelog_lock:
-        cached_rows = _gamelog_cache.get(cache_key)
+    with _GAMELOG_LOCK:
+        raw_rows = _GAMELOG_CACHE.get(cache_key)
 
-    if cached_rows is None:
+    if raw_rows is None:
         try:
-            cached_rows = await fetch_gamelogs_direct(player_id, season)
+            raw_rows = await fetch_gamelogs_direct(player_id, season)
         except httpx.TimeoutException:
             raise HTTPException(
                 status_code=502,
-                detail="stats.nba.com timed out — try again in a few seconds."
+                detail="stats.nba.com timed out — please try again."
             )
         except httpx.HTTPStatusError as e:
             raise HTTPException(
                 status_code=502,
-                detail=f"stats.nba.com returned {e.response.status_code} — try again shortly."
+                detail=f"stats.nba.com returned {e.response.status_code} — try again."
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"NBA data error: {e}")
 
-        with _gamelog_lock:
-            _gamelog_cache[cache_key] = cached_rows
+        with _GAMELOG_LOCK:
+            _GAMELOG_CACHE[cache_key] = raw_rows
 
-    if not cached_rows:
+    if not raw_rows:
         raise HTTPException(
             status_code=404,
             detail="No games found — player may not have played this season yet."
         )
 
-    # ── Process rows ─────────────────────────────────────────────
+    # Process: apply stat_type filter here so cache can serve multiple stat types
     logs = []
-    for row in cached_rows:
+    for row in raw_rows:
         min_val = parse_min(row.get("MIN"))
         if min_val < 1:
             continue
-        stat_val = compute_stat(row, stat_type)
-        matchup  = str(row.get("MATCHUP", ""))
-        opp      = matchup.replace("vs. ", "").replace("@ ", "").strip().split()[-1]
+        matchup = str(row.get("MATCHUP", ""))
+        opp     = matchup.replace("vs. ", "").replace("@ ", "").strip().split()[-1]
         logs.append({
             "date": row.get("GAME_DATE", ""),
             "min":  round(min_val, 1),
-            "stat": round(stat_val, 1),
+            "stat": round(compute_stat(row, stat_type), 1),
             "opponent": opp,
         })
 
-    # ── H2H filter ───────────────────────────────────────────────
-    h2h_logs = []
+    h2h = []
     if opponent:
         opp_up = opponent.upper().strip()
-        h2h_logs = [
+        h2h = [
             {"date": g["date"], "min": g["min"], "stat": g["stat"]}
             for g in logs if g["opponent"].upper() == opp_up
         ]
@@ -231,7 +195,7 @@ async def get_gamelogs(
 
     return {
         "recent_logs": to_pl(logs),
-        "h2h_logs":    to_pl(h2h_logs),
+        "h2h_logs":    to_pl(h2h),
         "l5":          window_stats(logs, 5),
         "l10":         window_stats(logs, 10),
         "l20":         window_stats(logs, 20),
@@ -251,7 +215,7 @@ async def get_dvp(position: str = Query("SG"), season: str = Query("2025-26")):
     url = f"https://app.unjuiced.bet/api/nba/dvp-rankings?position={position}&season={season}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             r.raise_for_status()
             return r.json()
     except Exception as e:
