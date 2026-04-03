@@ -312,3 +312,47 @@ async def get_dvp(position: str = Query("SG"), season: str = Query("2025-26")):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/debug/player/{player_id}")
+async def debug_player(player_id: int, season: str = Query("2025-26")):
+    """Debug endpoint — shows slug, raw row count, and first 2 rows."""
+    all_p  = get_all_players()
+    player = next((p for p in all_p if p["id"] == player_id), None)
+    if not player:
+        return {"error": "player not found in static list"}
+
+    try:
+        season_year = int(season.split("-")[0]) + 1
+    except Exception:
+        season_year = 2026
+
+    slug = make_bbref_slug(player["full_name"])
+    url  = f"https://www.basketball-reference.com/players/{slug[0]}/{slug}/gamelog/{season_year}/"
+
+    try:
+        async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=20, follow_redirects=True) as client:
+            r = await client.get(url)
+            status = r.status_code
+            html_len = len(r.text)
+            # Check if pgl_basic table exists
+            has_table = "pgl_basic" in r.text
+            # Get first 500 chars after pgl_basic
+            idx = r.text.find("pgl_basic")
+            snippet = r.text[idx:idx+300] if idx >= 0 else "NOT FOUND"
+            # Try parsing
+            rows = await fetch_bbref_gamelog(slug, season_year)
+    except Exception as e:
+        return {"error": str(e), "slug": slug, "url": url}
+
+    return {
+        "player": player["full_name"],
+        "slug": slug,
+        "url": url,
+        "http_status": status,
+        "html_length": html_len,
+        "has_pgl_basic_table": has_table,
+        "rows_parsed": len(rows),
+        "first_2_rows": rows[:2] if rows else [],
+        "table_snippet": snippet[:300],
+    }
