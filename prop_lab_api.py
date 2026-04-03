@@ -81,13 +81,14 @@ def stat_col_name(stat_type: str) -> str:
 
 def extract_stat(row_data: dict, stat_type: str) -> float:
     g = lambda k: float(row_data.get(k) or 0)
-    pts = g("PTS"); reb = g("TRB"); ast = g("AST")
+    # bbref lowercase keys: pts, trb, ast, fg3, blk, stl
+    pts = g("pts"); reb = g("trb"); ast = g("ast")
     if stat_type == "Points":     return pts
     if stat_type == "Rebounds":   return reb
     if stat_type == "Assists":    return ast
-    if stat_type == "3-Pointers": return g("3P")
-    if stat_type == "Blocks":     return g("BLK")
-    if stat_type == "Steals":     return g("STL")
+    if stat_type == "3-Pointers": return g("fg3")
+    if stat_type == "Blocks":     return g("blk")
+    if stat_type == "Steals":     return g("stl")
     if stat_type == "PRA":        return pts + reb + ast
     if stat_type == "PR":         return pts + reb
     if stat_type == "PA":         return pts + ast
@@ -187,7 +188,7 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
                     self.in_target_table = False
             elif tag == "tr" and self.in_target_table:
                 row = self.current_row
-                if row.get("date_game") and row.get("mp"):
+                if row.get("date") and row.get("mp"):
                     mp = row["mp"].strip()
                     skip = ("", "Inactive", "Did Not Play", "Did Not Dress",
                             "Not With Team", "Player Suspended")
@@ -281,9 +282,8 @@ async def get_gamelogs(
         if min_val < 1:
             continue
         stat_val = extract_stat(row, stat_type)
-        matchup  = row.get("opp_id", "") or row.get("game_location", "")
-        opp      = row.get("opp_id", "").strip()
-        date     = row.get("date_game", "")[:10]
+        opp      = row.get("opp_name_abbr", "").strip()
+        date     = row.get("date", "")[:10]
         logs.append({"date": date, "min": round(min_val, 1), "stat": round(stat_val, 1), "opponent": opp})
 
     # H2H filter
