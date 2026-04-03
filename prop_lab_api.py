@@ -336,6 +336,81 @@ def version():
     return {"version": "HTMLParser-v3", "uses_gamelog_parser": True}
 
 
+@app.get("/debug/parse/{player_id}")
+async def debug_parse(player_id: int, season: str = Query("2025-26")):
+    """Shows exactly what the HTMLParser sees."""
+    from html.parser import HTMLParser
+
+    all_p  = get_all_players()
+    player = next((p for p in all_p if p["id"] == player_id), None)
+    if not player:
+        return {"error": "not found"}
+
+    season_year = int(season.split("-")[0]) + 1
+    slug = make_bbref_slug(player["full_name"])
+    url  = f"https://www.basketball-reference.com/players/{slug[0]}/{slug}/gamelog/{season_year}/"
+
+    async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=20, follow_redirects=True) as client:
+        r = await client.get(url)
+    html = r.text
+
+    # Count how many times the table id appears
+    target_id = "player_game_log_reg"
+    occurrences = html.count(target_id)
+
+    # Show 300 chars around each occurrence
+    snippets = []
+    pos = 0
+    while True:
+        idx = html.find(target_id, pos)
+        if idx == -1: break
+        snippets.append(html[max(0,idx-50):idx+150])
+        pos = idx + 1
+
+    # Run the actual parser and count events
+    class DebugParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.table_starts = 0
+            self.in_table = False
+            self.tr_count = 0
+            self.td_count = 0
+            self.date_vals = []
+            self.mp_vals = []
+            self.depth = 0
+        def handle_starttag(self, tag, attrs):
+            attr_dict = dict(attrs)
+            if tag == "table":
+                if attr_dict.get("id") == "player_game_log_reg":
+                    self.table_starts += 1
+                    self.in_table = True
+                    self.depth = 1
+                elif self.in_table:
+                    self.depth += 1
+            elif self.in_table:
+                if tag == "tr": self.tr_count += 1
+                if tag == "td": self.td_count += 1
+        def handle_endtag(self, tag):
+            if tag == "table" and self.in_table:
+                self.depth -= 1
+                if self.depth == 0: self.in_table = False
+        def handle_data(self, data):
+            pass
+
+    dp = DebugParser()
+    dp.feed(html)
+
+    return {
+        "slug": slug,
+        "url": url,
+        "target_id_occurrences": occurrences,
+        "snippets_around_id": snippets,
+        "parser_table_starts": dp.table_starts,
+        "parser_in_table_trs": dp.tr_count,
+        "parser_in_table_tds": dp.td_count,
+    }
+
+
 @app.get("/debug/player/{player_id}")
 async def debug_player(player_id: int, season: str = Query("2025-26")):
     """Debug endpoint — shows slug, raw row count, and first 2 rows."""
