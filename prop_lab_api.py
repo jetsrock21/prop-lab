@@ -333,7 +333,69 @@ def health():
 
 @app.get("/debug/version")
 def version():
-    return {"version": "HTMLParser-v3", "uses_gamelog_parser": True}
+    return {"version": "HTMLParser-v4", "uses_gamelog_parser": True}
+
+
+@app.get("/debug/rows/{player_id}")
+async def debug_rows(player_id: int, season: str = Query("2025-26")):
+    """Show raw parsed row data from first 3 rows."""
+    from html.parser import HTMLParser
+
+    all_p  = get_all_players()
+    player = next((p for p in all_p if p["id"] == player_id), None)
+    if not player:
+        return {"error": "not found"}
+
+    season_year = int(season.split("-")[0]) + 1
+    slug = make_bbref_slug(player["full_name"])
+    url  = f"https://www.basketball-reference.com/players/{slug[0]}/{slug}/gamelog/{season_year}/"
+
+    async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=20, follow_redirects=True) as client:
+        r = await client.get(url)
+    html = r.text
+
+    class AllRowParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = False
+            self.depth    = 0
+            self.in_cell  = False
+            self.cur_stat = None
+            self.cur_row  = {}
+            self.all_rows = []
+        def handle_starttag(self, tag, attrs):
+            d = dict(attrs)
+            if tag == "table" and d.get("id") == "player_game_log_reg":
+                self.in_table = True; self.depth = 1
+            elif tag == "table" and self.in_table:
+                self.depth += 1
+            elif tag == "tr" and self.in_table:
+                self.cur_row = {}
+            elif tag in ("td","th") and self.in_table:
+                self.cur_stat = d.get("data-stat")
+                self.in_cell  = True
+        def handle_endtag(self, tag):
+            if tag == "table" and self.in_table:
+                self.depth -= 1
+                if self.depth == 0: self.in_table = False
+            elif tag == "tr" and self.in_table:
+                if self.cur_row:
+                    self.all_rows.append(dict(self.cur_row))
+                self.cur_row = {}
+            elif tag in ("td","th") and self.in_table:
+                self.in_cell = False; self.cur_stat = None
+        def handle_data(self, data):
+            if self.in_table and self.in_cell and self.cur_stat:
+                self.cur_row[self.cur_stat] = (self.cur_row.get(self.cur_stat,"") + data).strip()
+
+    p = AllRowParser()
+    p.feed(html)
+
+    return {
+        "total_rows_collected": len(p.all_rows),
+        "first_3_rows": p.all_rows[:3],
+        "all_keys_seen": sorted(set(k for r in p.all_rows for k in r.keys())),
+    }
 
 
 @app.get("/debug/parse/{player_id}")
