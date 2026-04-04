@@ -1326,10 +1326,10 @@ function ParsedPreview({rows, label, statType, useRecency=false, decayStrength=0
           const wColor = `rgba(74,158,255,${0.35+wPct*0.65})`;
           return(
             <div key={i} style={{display:"grid",gridTemplateColumns:cols,gap:0,padding:"0.25rem 0.5rem",borderBottom:i<rows.length-1?"1px solid #0a1628":"none",background:i%2===0?"#050d1a":"#080f1e"}}>
-              <span style={{color:"#8ba7c0",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.date}</span>
-              <span style={{color:"#e8f4fd",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem"}}>{r.min.toFixed(1)}</span>
+              <span style={{color:"#8ba7c0",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.date||"—"}</span>
+              <span style={{color:"#e8f4fd",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem"}}>{parseFloat(r.min).toFixed(1)}</span>
               <span style={{color:"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem"}}>{r.stat}</span>
-              <span style={{color:"#00e676",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem"}}>{r.rate}</span>
+              <span style={{color:"#00e676",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem"}}>{r.rate!=null?r.rate:(parseFloat(r.min)>0?(parseFloat(r.stat)/parseFloat(r.min)).toFixed(3):"—")}</span>
               {showW&&<span style={{color:wColor,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem"}}>{(w*100).toFixed(1)}%</span>}
             </div>
           );
