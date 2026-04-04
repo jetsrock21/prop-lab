@@ -315,7 +315,7 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
 
     parser = GameLogParser()
     parser.feed(html)
-    return parser.rows
+    return list(reversed(parser.rows))  # newest first
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
