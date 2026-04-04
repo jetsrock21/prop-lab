@@ -447,7 +447,7 @@ async def get_gamelogs(
             for g in logs if g["opponent"].upper() == opp_up
         ]
 
-    def to_pl(gl): return [{"min": str(g["min"]), "stat": str(g["stat"])} for g in gl]
+    def to_pl(gl): return [{"date": str(g.get("date","")),"min": str(g["min"]), "stat": str(g["stat"])} for g in gl]
 
     return {
         "recent_logs": to_pl(logs),
