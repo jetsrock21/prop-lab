@@ -695,27 +695,98 @@ function buildGameLogModel({ logs, h2hLogs, l5OppAllowed='', l10OppAllowed='', l
 // ═══════════════════════════════════════════════════════════════
 // GRADE + RECOMMENDATION from diff%
 // ═══════════════════════════════════════════════════════════════
-function getGrade(diffPct){
-  if(diffPct>=15) return "A+"; if(diffPct>=8) return "A";
-  if(diffPct>=4)  return "B+"; if(diffPct>=1) return "B";
-  if(diffPct>=-2) return "C+"; if(diffPct>=-5) return "C";
-  if(diffPct>=-10) return "D"; return "F";
+// ── Edge Score 0-100 ─────────────────────────────────────────
+// Stat-type typical CV (coefficient of variation) — higher = more volatile stat
+// Used to normalize edge% so +5% on rebounds ≠ +5% on points
+const STAT_CV = {
+  "Points":     0.28,
+  "Rebounds":   0.45,
+  "Assists":    0.50,
+  "3-Pointers": 0.80,
+  "Blocks":     0.90,
+  "Steals":     0.85,
+  "PRA":        0.22,
+  "PR":         0.26,
+  "PA":         0.28,
+  "RA":         0.40,
+};
+
+function getEdgeScore({ diffPct, overPct, boomPct, bustPct, minuteStability, statType }){
+  // 1. Normalize edge by stat volatility — high-variance stats need bigger edge to matter
+  const cv = STAT_CV[statType] || 0.35;
+  // edgeNorm: how many CVs away from neutral (50/50)
+  // e.g. +10% edge on Points (cv=0.28) = 0.36 CVs  vs  +10% on Blocks (cv=0.90) = 0.11 CVs
+  const edgeNorm = clamp((diffPct / 100) / cv, -1, 1); // -1 to +1
+
+  // 2. Over probability — direct from sim (already accounts for variance)
+  const overScore = clamp((overPct - 50) / 50, -1, 1); // -1 to +1
+
+  // 3. Boom/bust ratio — how clean is the edge
+  const bb = (boomPct || 0) - (bustPct || 0); // positive = more upside than downside
+  const bbScore = clamp(bb / 30, -1, 1);
+
+  // 4. Minutes stability penalty — unstable minutes reduce confidence
+  const stabPenalty = (minuteStability != null) ? (minuteStability - 0.5) * 0.2 : 0;
+
+  // Weighted composite: -1 to +1
+  const raw = edgeNorm * 0.35 + overScore * 0.45 + bbScore * 0.15 + stabPenalty * 0.05;
+
+  // Map to 0-100 with 50 = neutral (proj == line, 50% over prob)
+  return Math.round(clamp(50 + raw * 50, 0, 100));
 }
+
+function scoreColor(score){
+  if(score >= 70) return "#00e676";
+  if(score >= 60) return "#69f0ae";
+  if(score >= 52) return "#ffee58";
+  if(score >= 45) return "#ff9800";
+  return "#ff7043";
+}
+
+function scoreLabel(score){
+  if(score >= 72) return "STRONG OVER";
+  if(score >= 60) return "LEAN OVER";
+  if(score >= 53) return "SLIGHT OVER";
+  if(score >= 47) return "NEUTRAL";
+  if(score >= 40) return "LEAN UNDER";
+  if(score >= 28) return "STRONG UNDER";
+  return "FADE";
+}
+
+// Keep getRec for history card compatibility
 function getRec(diffPct){
   if(diffPct>=3) return {rec:"OVER",color:"#00e676"};
   if(diffPct<=-3) return {rec:"UNDER",color:"#ff7043"};
   return {rec:"PUSH / AVOID",color:"#ffee58"};
 }
 
+// getGrade kept for history backward compat — now maps score to letter
+function getGrade(diffPct){ return diffPct >= 5 ? "OVER" : diffPct <= -5 ? "UNDER" : "PUSH"; }
+
 // ═══════════════════════════════════════════════════════════════
 // UI COMPONENTS
 // ═══════════════════════════════════════════════════════════════
+function ScoreBadge({score, size="lg"}){
+  const col = scoreColor(score);
+  const lbl = scoreLabel(score);
+  const fs  = size==="lg" ? "3rem" : size==="md" ? "1.8rem" : "1.1rem";
+  const subFs = size==="lg" ? "0.65rem" : "0.52rem";
+  return(
+    <div style={{textAlign:"center",display:"inline-block"}}>
+      <div style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:fs,fontWeight:900,
+        color:col,lineHeight:1,textShadow:`0 0 20px ${col}80`}}>
+        {score}
+      </div>
+      <div style={{color:col,fontFamily:"'JetBrains Mono',monospace",fontSize:subFs,
+        letterSpacing:"0.08em",marginTop:"0.1em",opacity:0.85}}>
+        {size!=="sm"?lbl:""}
+      </div>
+    </div>
+  );
+}
+// Kept for history cards
 function GradeBadge({grade,size="lg"}){
-  const C={"A+":{bg:"#00ff87",tx:"#001a0a",glow:"#00ff87"},"A":{bg:"#00e676",tx:"#001a0a",glow:"#00e676"},"B+":{bg:"#69f0ae",tx:"#001a0a",glow:"#69f0ae"},"B":{bg:"#b9f6ca",tx:"#001a0a",glow:"#b9f6ca"},"C+":{bg:"#fff176",tx:"#1a1a00",glow:"#fff176"},"C":{bg:"#ffee58",tx:"#1a1a00",glow:"#ffee58"},"D":{bg:"#ff7043",tx:"#fff",glow:"#ff7043"},"F":{bg:"#f44336",tx:"#fff",glow:"#f44336"}};
-  const c=C[grade]||C["C"];
-  const fs=size==="lg"?"3.5rem":size==="md"?"1.8rem":"1.1rem";
-  const pd=size==="lg"?"0.4em 0.7em":"0.2em 0.5em";
-  return <span style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:fs,fontWeight:900,background:c.bg,color:c.tx,borderRadius:"0.2em",padding:pd,display:"inline-block",letterSpacing:"-0.02em",boxShadow:`0 0 30px ${c.glow}60,0 0 60px ${c.glow}30`,lineHeight:1}}>{grade}</span>;
+  return <ScoreBadge score={typeof grade==="number"?grade:50} size={size}/>;
 }
 function Bar({value,color,height=8}){
   return <div style={{background:"#0a1628",borderRadius:4,height,overflow:"hidden"}}><div style={{width:`${Math.min(100,Math.max(0,value))}%`,height:"100%",background:color,borderRadius:4,transition:"width 0.8s ease"}}/></div>;
@@ -884,7 +955,7 @@ function HistCard({e,onDel,onLoad}){
             {(e.form?.statType||e.logForm?.statType||"—")} · LINE {e.activePropLine||e.form?.prop||"—"} · {e.ts}
           </div>
         </div>
-        <GradeBadge grade={e.result.grade} size="sm"/>
+        <ScoreBadge score={typeof e.result.grade==="number"?e.result.grade:50} size="sm"/>
       </div>
       {/* Stats row */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"0.5rem",marginBottom:"0.65rem"}}>
@@ -1669,7 +1740,16 @@ export default function App(){
       : model?.projection;
   const activeDiff=effectiveProj&&activePropLine?effectiveProj-parseFloat(activePropLine):null;
   const activeDiffPct=activeDiff&&activePropLine?(activeDiff/parseFloat(activePropLine))*100:null;
-  const activeGrade=activeDiffPct!=null?getGrade(activeDiffPct):null;
+  const activeStatType = inputMode==="summary" ? form.statType : (logForm.statType||"Points");
+  const activeScore = (activeDiffPct!=null&&simStats) ? getEdgeScore({
+    diffPct: activeDiffPct,
+    overPct: simStats.overPct,
+    boomPct: simStats.boomPct||0,
+    bustPct: simStats.bustPct||0,
+    minuteStability: model?.minuteStability??0.7,
+    statType: activeStatType,
+  }) : null;
+  const activeGrade=activeScore; // kept for compat
   const activeRec=activeDiffPct!=null?getRec(activeDiffPct):null;
 
   useEffect(()=>{
@@ -1904,6 +1984,12 @@ export default function App(){
     const ss=propLine?calcSimStats(newSim.outcomes,propLine):null;
     const diffPct=propLine?((m.projection-propLine)/propLine)*100:0;
     const {rec}=getRec(diffPct);
+    const ss2=propLine?calcSimStats(newSim.outcomes,propLine):null;
+    const histScore = ss2 ? getEdgeScore({
+      diffPct, overPct:ss2.overPct, boomPct:ss2.boomPct||0, bustPct:ss2.bustPct||0,
+      minuteStability:m?.minuteStability??0.7,
+      statType: inputMode==="summary"?form.statType:(logForm.statType||"Points"),
+    }) : 50;
     const entry={
       id:Date.now(),
       ts:new Date().toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}),
@@ -1918,7 +2004,7 @@ export default function App(){
       decayStrength,
       simIters,
       activePropLine:String(propLine||""),
-      result:{projection:m.projection.toFixed(1),grade:getGrade(diffPct),recommendation:rec,simStats:ss},
+      result:{projection:m.projection.toFixed(1),grade:histScore,recommendation:rec,simStats:ss},
     };
     persist([entry,...history].slice(0,50));
   };
@@ -2467,7 +2553,7 @@ export default function App(){
                         {playerName&&<div style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:"1.5rem",color:"#e8f4fd",marginBottom:"0.2rem"}}>{playerName.toUpperCase()}</div>}
                         <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.8rem"}}>{statType.toUpperCase()} · LINE: <span style={{color:"#4a9eff"}}>{activePropLine}</span></div>
                       </div>
-                      {activeGrade&&<GradeBadge grade={activeGrade}/>}
+                      {activeScore!=null&&<ScoreBadge score={activeScore}/>}
                     </div>
 
                     {/* Editable projection + prop line */}
