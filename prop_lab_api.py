@@ -317,12 +317,45 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
 # ── Routes ─────────────────────────────────────────────────────────────────
 @app.get("/players/refresh")
 async def refresh_players():
-    """Force-refresh player list from basketball-reference (includes current rookies)."""
+    """Force-refresh + debug: shows count and searches for specific rookies."""
     global _player_cache
     with _player_lock:
-        _player_cache = None   # clear cache to force re-fetch
+        _player_cache = None
     players = await get_player_list()
-    return {"refreshed": True, "count": len(players), "sample": [p["full_name"] for p in players[:5]]}
+    names = [p["full_name"] for p in players]
+    rookies_check = ["Cooper Flagg", "Dylan Harper", "Zaccharie Risacher", "Alexandre Sarr"]
+    return {
+        "refreshed": True,
+        "count": len(players),
+        "first_10": names[:10],
+        "last_10": names[-10:],
+        "rookies_found": {r: r in names for r in rookies_check},
+        "f_players": [n for n in names if n.startswith("F")],
+        "h_players": [n for n in names if n.startswith("H")],
+    }
+
+
+@app.get("/players/debug-page")
+async def debug_page():
+    """Fetch the bbref page and show raw parse info."""
+    url = "https://www.basketball-reference.com/leagues/NBA_2026_per_game.html"
+    async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=15, follow_redirects=True) as client:
+        r = await client.get(url)
+    html = r.text
+    # Count table occurrences
+    tables = re.findall(r'<table[^>]+id="([^"]+)"', html)
+    # Look for Cooper Flagg specifically
+    flagg_idx = html.find("Flagg")
+    flagg_ctx = html[max(0,flagg_idx-100):flagg_idx+200] if flagg_idx >= 0 else "NOT FOUND"
+    harper_idx = html.find("Harper")
+    harper_ctx = html[max(0,harper_idx-50):harper_idx+150] if harper_idx >= 0 else "NOT FOUND"
+    return {
+        "table_ids": tables,
+        "flagg_in_html": flagg_idx >= 0,
+        "flagg_context": flagg_ctx,
+        "harper_context": harper_ctx,
+        "html_length": len(html),
+    }
 
 
 @app.get("/players/search")
