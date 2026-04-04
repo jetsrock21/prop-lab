@@ -60,8 +60,12 @@ class _RosterParser(HTMLParser):
         elif tag == "tr" and self.in_table:
             self.cur_row = {}
         elif tag in ("td","th") and self.in_table:
-            self.cur_stat = d.get("data-stat"); self.in_td = True
-        elif tag == "a" and self.in_table and self.cur_stat == "player":
+            self.cur_stat = d.get("data-stat")
+            self.in_td = True
+            # Slug is in data-append-csv on the name_display <td>
+            if self.cur_stat == "name_display" and d.get("data-append-csv"):
+                self.cur_row["slug"] = d["data-append-csv"]
+        elif tag == "a" and self.in_table and self.cur_stat == "name_display":
             href = d.get("href","")
             m = re.search(r"/players/[a-z]/([a-z0-9]+)\.html", href)
             if m: self.cur_row["slug"] = m.group(1)
@@ -86,7 +90,7 @@ class _RosterParser(HTMLParser):
             self.in_td = False; self.cur_stat = None
 
     def handle_data(self, data):
-        if self.in_table and self.in_td and self.cur_stat == "player":
+        if self.in_table and self.in_td and self.cur_stat == "name_display":
             if data.strip(): self.cur_row["player"] = data.strip()
 
 
