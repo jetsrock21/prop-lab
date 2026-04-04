@@ -1987,6 +1987,7 @@ export default function App(){
     });
     setSim(newSim);
     setDone(true);
+    window.scrollTo({top:0,behavior:'smooth'});
     // save history
     const ss=propLine?calcSimStats(newSim.outcomes,propLine):null;
     const diffPct=propLine?((m.projection-propLine)/propLine)*100:0;
@@ -2919,8 +2920,8 @@ export default function App(){
 
                   {/* BUTTONS */}
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.75rem"}}>
-                    <button onClick={()=>{setDone(false);setSim(null);setModel(null);}} style={{padding:"0.8rem",background:"transparent",color:"#4a9eff",border:"1px solid #1e3a5a",borderRadius:8,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.95rem",letterSpacing:"0.1em",cursor:"pointer"}}>✏️ EDIT</button>
-                    <button onClick={()=>{setForm(EMPTY_FORM);setLogForm(EMPTY_LOG);setModel(null);setSim(null);setDone(false);setProjOverride("");setActivePropLine("");setMinutesOverride(null);setPasteParsedLogs([]);setPasteParsedH2H([]);setGameLimit(0);setMinFilter(0);nba.setPlayerId(null);nba.setPlayerName("");nba.setLoaded(false);nba.setError("");setDvpOpp("");}} style={{padding:"0.8rem",background:"transparent",color:"#3a6080",border:"1px solid #1e3a5a",borderRadius:8,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.95rem",letterSpacing:"0.1em",cursor:"pointer"}}>+ NEW PROP</button>
+                    <button onClick={()=>{setDone(false);setSim(null);setModel(null);window.scrollTo({top:0,behavior:'smooth'});}} style={{padding:"0.8rem",background:"transparent",color:"#4a9eff",border:"1px solid #1e3a5a",borderRadius:8,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.95rem",letterSpacing:"0.1em",cursor:"pointer"}}>✏️ EDIT</button>
+                    <button onClick={()=>{setForm(EMPTY_FORM);setLogForm(EMPTY_LOG);setModel(null);setSim(null);setDone(false);setProjOverride("");setActivePropLine("");setMinutesOverride(null);setPasteParsedLogs([]);setPasteParsedH2H([]);setGameLimit(0);setMinFilter(0);nba.setPlayerId(null);nba.setPlayerName("");nba.setLoaded(false);nba.setError("");setDvpOpp("");window.scrollTo({top:0,behavior:'smooth'});}} style={{padding:"0.8rem",background:"transparent",color:"#3a6080",border:"1px solid #1e3a5a",borderRadius:8,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.95rem",letterSpacing:"0.1em",cursor:"pointer"}}>+ NEW PROP</button>
                   </div>
                 </div>
               )}
