@@ -1833,7 +1833,8 @@ export default function App(){
 
   // ── NBA API data loader ──
   const nba = useNBAData();
-  const [gameLimit, setGameLimit] = useState(0); // 0 = load all
+  const [gameLimit, setGameLimit] = useState(0);   // 0 = load all
+  const [minFilter, setMinFilter] = useState(0);   // 0 = no filter, exclude games below this
 
   // ── DvP matchup auto-fill ──
   const dvp = useDvP();
@@ -1867,9 +1868,15 @@ export default function App(){
     if (!data) return;
 
     // Apply game limit (0 = all games)
-    const limit = parseInt(gameLimit) || 0;
+    const limit   = parseInt(gameLimit) || 0;
+    const minMin  = parseFloat(minFilter) || 0;
     const allLogs = data.recent_logs || [];
-    const slicedLogs = limit > 0 ? allLogs.slice(0, limit) : allLogs;
+    // Apply min filter first (remove injury/garbage time games)
+    const filteredLogs = minMin > 0
+      ? allLogs.filter(r => parseFloat(r.min) >= minMin)
+      : allLogs;
+    // Then apply game count limit
+    const slicedLogs = limit > 0 ? filteredLogs.slice(0, limit) : filteredLogs;
 
     setPasteParsedLogs(slicedLogs);
     if (nba.opponent && data.h2h_logs) setPasteParsedH2H(data.h2h_logs);
@@ -2323,8 +2330,37 @@ export default function App(){
                               )}
                             </div>
                           )}
-                          {/* Game limit selector */}
+                          {/* Filters row: min minutes + game limit */}
                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.65rem",marginTop:"0.65rem"}}>
+                            <div>
+                              <label style={{color:"#4a9eff",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"0.72rem",letterSpacing:"0.1em",textTransform:"uppercase",display:"block",marginBottom:"0.25rem"}}>
+                                Min Minutes Filter
+                              </label>
+                              <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
+                                <input
+                                  type="number" min="0" max="48" step="1"
+                                  placeholder="Off"
+                                  value={minFilter||""}
+                                  onChange={e=>setMinFilter(parseFloat(e.target.value)||0)}
+                                  style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:6,color:"#e8f4fd",padding:"0.5rem 0.65rem",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.9rem",width:"100%",outline:"none"}}
+                                />
+                                {minFilter>0&&(
+                                  <button onClick={()=>setMinFilter(0)}
+                                    style={{background:"none",border:"none",color:"#3a6080",cursor:"pointer",fontSize:"0.9rem",padding:"0.2rem",flexShrink:0}}>✕</button>
+                                )}
+                              </div>
+                              <div style={{color:"#2a4060",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.58rem",marginTop:"0.2rem"}}>
+                                {minFilter>0?`Excluding games under ${minFilter} min`:"Keeping all games"}
+                              </div>
+                              <div style={{display:"flex",gap:"0.3rem",marginTop:"0.35rem",flexWrap:"wrap"}}>
+                                {[10,15,20,25].map(n=>(
+                                  <button key={n} onClick={()=>setMinFilter(n)}
+                                    style={{padding:"0.3rem 0.5rem",background:minFilter===n?"#4a9eff":"#0a1628",color:minFilter===n?"#050d1a":"#3a6080",border:`1px solid ${minFilter===n?"#4a9eff":"#1e3a5a"}`,borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",cursor:"pointer"}}>
+                                    {n}+
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
                             <div>
                               <label style={{color:"#4a9eff",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"0.72rem",letterSpacing:"0.1em",textTransform:"uppercase",display:"block",marginBottom:"0.25rem"}}>
                                 Load Last N Games
@@ -2364,6 +2400,7 @@ export default function App(){
                                 padding:"0.4rem 0.6rem",background:"#0a1a0a",borderRadius:5,border:"1px solid #1a3a1a",marginBottom:"0.5rem"}}>
                                 ✓ {pasteParsedLogs.length} games loaded for {nba.playerName}
                                 {gameLimit>0&&` (last ${gameLimit})`}
+                                {minFilter>0&&` · ${minFilter}+ min only`}
                                 {pasteParsedH2H.length>0&&` · ${pasteParsedH2H.length} H2H vs ${nba.opponent}`}
                                 {" · "}
                                 <span style={{color:"#3a8060"}}>edit any values below before analyzing</span>
