@@ -33,94 +33,114 @@ BBREF_HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
-# ── Player list: live from bbref + nba_api static fallback ────────────────
-async def fetch_current_players() -> list:
+# ── Player list: always from bbref live page ─────────────────────────────
+# No static fallback for search — bbref is reliable and includes rookies.
+# nba_api static used only for slug generation when bbref lookup fails.
+
+from html.parser import HTMLParser
+
+class _RosterParser(HTMLParser):
+    """Parses bbref per-game stats page to get current season player list."""
+    def __init__(self):
+        super().__init__()
+        self.in_table = False
+        self.in_td    = False
+        self.cur_stat = None
+        self.cur_row  = {}
+        self.players  = []
+        self.depth    = 0
+        self.seen     = set()
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if tag == "table" and d.get("id") == "per_game_stats":
+            self.in_table = True; self.depth = 1
+        elif tag == "table" and self.in_table:
+            self.depth += 1
+        elif tag == "tr" and self.in_table:
+            self.cur_row = {}
+        elif tag in ("td","th") and self.in_table:
+            self.cur_stat = d.get("data-stat"); self.in_td = True
+        elif tag == "a" and self.in_table and self.cur_stat == "player":
+            href = d.get("href","")
+            m = re.search(r"/players/[a-z]/([a-z0-9]+)\.html", href)
+            if m: self.cur_row["slug"] = m.group(1)
+
+    def handle_endtag(self, tag):
+        if tag == "table" and self.in_table:
+            self.depth -= 1
+            if self.depth == 0: self.in_table = False
+        elif tag == "tr" and self.in_table:
+            name = self.cur_row.get("player","").strip()
+            slug = self.cur_row.get("slug","")
+            if name and slug and slug not in self.seen:
+                self.seen.add(slug)
+                # Stable ID: map known players via nba_api, else hash-based
+                pid = abs(hash(slug)) % 9000000 + 1000000
+                self.players.append({
+                    "id": pid, "full_name": name,
+                    "is_active": True, "slug": slug
+                })
+            self.cur_row = {}
+        elif tag in ("td","th") and self.in_table:
+            self.in_td = False; self.cur_stat = None
+
+    def handle_data(self, data):
+        if self.in_table and self.in_td and self.cur_stat == "player":
+            if data.strip(): self.cur_row["player"] = data.strip()
+
+
+async def get_player_list() -> list:
     """
-    Fetch current season roster from basketball-reference.
-    Falls back to nba_api static list if bbref is unavailable.
-    Each player: {id, full_name, is_active, slug}
+    Always fetch the current NBA season player list from bbref.
+    Cached after first successful fetch.
     """
-    try:
-        url = "https://www.basketball-reference.com/leagues/NBA_2026_per_game.html"
-        async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=15, follow_redirects=True) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-
-        from html.parser import HTMLParser
-        class RosterParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.in_table = False
-                self.in_td    = False
-                self.cur_stat = None
-                self.cur_row  = {}
-                self.players  = []
-                self.depth    = 0
-                self.seen     = set()
-            def handle_starttag(self, tag, attrs):
-                d = dict(attrs)
-                if tag == "table" and d.get("id") == "per_game_stats":
-                    self.in_table = True; self.depth = 1
-                elif tag == "table" and self.in_table:
-                    self.depth += 1
-                elif tag == "tr" and self.in_table:
-                    self.cur_row = {}
-                elif tag in ("td","th") and self.in_table:
-                    self.cur_stat = d.get("data-stat"); self.in_td = True
-                elif tag == "a" and self.in_table and self.cur_stat == "player":
-                    href = d.get("href","")
-                    m = re.search(r"/players/\w/(\w+)\.html", href)
-                    if m: self.cur_row["slug"] = m.group(1)
-            def handle_endtag(self, tag):
-                if tag == "table" and self.in_table:
-                    self.depth -= 1
-                    if self.depth == 0: self.in_table = False
-                elif tag == "tr" and self.in_table:
-                    name = self.cur_row.get("player","").strip()
-                    slug = self.cur_row.get("slug","")
-                    if name and slug and slug not in self.seen:
-                        self.seen.add(slug)
-                        # Generate a stable numeric ID from slug
-                        pid = abs(hash(slug)) % 9000000 + 1000000
-                        self.players.append({
-                            "id": pid, "full_name": name,
-                            "is_active": True, "slug": slug
-                        })
-                    self.cur_row = {}
-                elif tag in ("td","th") and self.in_table:
-                    self.in_td = False; self.cur_stat = None
-            def handle_data(self, data):
-                if self.in_table and self.in_td and self.cur_stat and self.cur_stat != "player":
-                    self.cur_row[self.cur_stat] = data.strip()
-                elif self.in_table and self.in_td and self.cur_stat == "player":
-                    if data.strip(): self.cur_row["player"] = data.strip()
-
-        p = RosterParser()
-        p.feed(r.text)
-        if p.players:
-            return p.players
-    except Exception:
-        pass
-
-    # Fallback: nba_api static list
-    return [
-        {"id": p["id"], "full_name": p["full_name"], "is_active": p["is_active"], "slug": ""}
-        for p in nba_players.get_players()
-    ]
-
-def get_all_players():
-    """Return cached player list (sync wrapper)."""
     global _player_cache
     if _player_cache is not None:
         return _player_cache
-    # Return static list synchronously on first call; async refresh happens on /players/refresh
+
+    url = "https://www.basketball-reference.com/leagues/NBA_2026_per_game.html"
+    try:
+        async with httpx.AsyncClient(headers=BBREF_HEADERS, timeout=15, follow_redirects=True) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+        parser = _RosterParser()
+        parser.feed(r.text)
+        if parser.players:
+            # Also cross-ref with nba_api for canonical IDs on known players
+            static = {p["full_name"].lower(): p["id"] for p in nba_players.get_players()}
+            for p in parser.players:
+                known_id = static.get(p["full_name"].lower())
+                if known_id:
+                    p["id"] = known_id
+            with _player_lock:
+                _player_cache = parser.players
+            return parser.players
+    except Exception as e:
+        pass
+
+    # Hard fallback: nba_api static (won't have rookies but won't crash)
+    fallback = [
+        {"id": p["id"], "full_name": p["full_name"],
+         "is_active": p["is_active"], "slug": ""}
+        for p in nba_players.get_players()
+        if p["is_active"]   # only active players in fallback
+    ]
     with _player_lock:
-        if _player_cache is None:
-            _player_cache = [
-                {"id": p["id"], "full_name": p["full_name"], "is_active": p["is_active"], "slug": ""}
-                for p in nba_players.get_players()
-            ]
-    return _player_cache
+        _player_cache = fallback
+    return fallback
+
+
+# sync shim used by gamelogs endpoint (player name lookup only)
+def get_all_players():
+    global _player_cache
+    if _player_cache is not None:
+        return _player_cache
+    # Cache not ready yet — return active static players temporarily
+    return [
+        {"id": p["id"], "full_name": p["full_name"], "is_active": True, "slug": ""}
+        for p in nba_players.get_players() if p["is_active"]
+    ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 def parse_min(v) -> float:
@@ -299,24 +319,19 @@ async def fetch_bbref_gamelog(slug: str, season_year: int) -> list:
 async def refresh_players():
     """Force-refresh player list from basketball-reference (includes current rookies)."""
     global _player_cache
-    players = await fetch_current_players()
     with _player_lock:
-        _player_cache = players
-    return {"refreshed": True, "count": len(players)}
+        _player_cache = None   # clear cache to force re-fetch
+    players = await get_player_list()
+    return {"refreshed": True, "count": len(players), "sample": [p["full_name"] for p in players[:5]]}
 
 
 @app.get("/players/search")
 async def search_players(q: str = Query(..., min_length=2)):
-    global _player_cache
-    # Lazy-load live list on first search
-    if _player_cache is None:
-        players = await fetch_current_players()
-        with _player_lock:
-            _player_cache = players
+    players = await get_player_list()
     q_lower = q.lower().strip()
     matches = [
         {"id": p["id"], "full_name": p["full_name"], "is_active": p.get("is_active", True)}
-        for p in _player_cache if q_lower in p["full_name"].lower()
+        for p in players if q_lower in p["full_name"].lower()
     ]
     matches.sort(key=lambda x: (not x["is_active"], x["full_name"]))
     return matches[:25]
