@@ -2133,6 +2133,22 @@ export default function App(){
                       <>
                         <div style={SEC()}>Player Info</div>
 
+                        {/* Stat Type row */}
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"1rem"}}>
+                          <div><label style={L}>Stat Type</label><select style={{...S,cursor:"pointer"}} value={logForm.statType||"Points"} onChange={e=>setLF("statType",e.target.value)}>{STAT_TYPES.map(s=><option key={s}>{s}</option>)}</select></div>
+                          <div><label style={L}>Player Name</label><input style={S} placeholder="or type manually" value={logForm.playerName||""} onChange={e=>setLF("playerName",e.target.value)}/></div>
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"1.5rem"}}>
+                          <div>
+                            <label style={L}>Prop Line</label>
+                            <input style={{...S,fontSize:"1.2rem",fontWeight:600}} placeholder="34.5" type="number" step="0.5" value={logForm.propLine||""} onChange={e=>setLF("propLine",e.target.value)}/>
+                          </div>
+                          <div>
+                            <label style={L}>Proj Minutes Tonight</label>
+                            <input style={S} placeholder="34" type="number" step="0.5" value={logForm.projMin} onChange={e=>setLF("projMin",e.target.value)}/>
+                          </div>
+                        </div>
+
                         {/* NBA API loader panel */}
                         <div style={{background:"#050d1a",border:"1px solid #1e3a5a",borderRadius:8,padding:"0.9rem 1rem",marginBottom:"1.25rem"}}>
                           <div style={{fontFamily:"'Black Han Sans',sans-serif",color:"#4a9eff",fontSize:"0.68rem",letterSpacing:"0.2em",textTransform:"uppercase",marginBottom:"0.75rem"}}>
@@ -2286,22 +2302,6 @@ export default function App(){
                               )}
                             </div>
                           )}
-                        </div>
-
-                        {/* Stat Type row */}
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"1rem"}}>
-                          <div><label style={L}>Stat Type</label><select style={{...S,cursor:"pointer"}} value={logForm.statType||"Points"} onChange={e=>setLF("statType",e.target.value)}>{STAT_TYPES.map(s=><option key={s}>{s}</option>)}</select></div>
-                          <div><label style={L}>Player Name</label><input style={S} placeholder="or type manually" value={logForm.playerName||""} onChange={e=>setLF("playerName",e.target.value)}/></div>
-                        </div>
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"1.5rem"}}>
-                          <div>
-                            <label style={L}>Prop Line</label>
-                            <input style={{...S,fontSize:"1.2rem",fontWeight:600}} placeholder="34.5" type="number" step="0.5" value={logForm.propLine||""} onChange={e=>setLF("propLine",e.target.value)}/>
-                          </div>
-                          <div>
-                            <label style={L}>Proj Minutes Tonight</label>
-                            <input style={S} placeholder="34" type="number" step="0.5" value={logForm.projMin} onChange={e=>setLF("projMin",e.target.value)}/>
-                          </div>
                         </div>
 
                         {/* paste / manual sub-tab switcher */}
