@@ -796,9 +796,12 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
     const totalW    = vals.reduce((a,x)=>a+x.w,0);
     const weightedRating = vals.reduce((a,x)=>a+x.v*x.w,0)/totalW;
 
+    // Sort by absolute distance from weighted rating, take 8 closest
     const similarTeams = dvpData
       .map(t=>({ abbr:(t.teamAbbr||"").toUpperCase(), val:parseFloat(t[seasonField])||0 }))
-      .filter(t=>t.val>0 && Math.abs(t.val-weightedRating)/weightedRating<=0.20)
+      .filter(t=>t.val>0)
+      .sort((a,b)=>Math.abs(a.val-weightedRating)-Math.abs(b.val-weightedRating))
+      .slice(0,8)
       .map(t=>t.abbr);
 
     if (!similarTeams.length) return [];
@@ -996,12 +999,13 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
         const wr = vals.reduce((a,x)=>a+x.v*x.w,0)/totalW;
         const similar = dvpData
           .map(t=>({abbr:(t.teamAbbr||"").toUpperCase(), val:parseFloat(t[seasonField])||0}))
-          .filter(t=>t.val>0 && Math.abs(t.val-wr)/wr<=0.20)
-          .map(t=>t.abbr);
+          .filter(t=>t.val>0)
+          .sort((a,b)=>Math.abs(a.val-wr)-Math.abs(b.val-wr))
+          .slice(0,8);
         return (
-          <div style={{marginTop:"0.5rem",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.58rem",color:"#2a4060",lineHeight:1.6}}>
-            <span style={{color:"#3a6080"}}>Similar to {dvpOpp} ({wr.toFixed(1)} avg allowed): </span>
-            <span style={{color:"#1e3050"}}>{similar.join(", ")}</span>
+          <div style={{marginTop:"0.5rem",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.58rem",lineHeight:1.7}}>
+            <span style={{color:"#3a6080"}}>8 closest matchups to {dvpOpp} ({wr.toFixed(1)} allowed): </span>
+            <span style={{color:"#1e3050"}}>{similar.map(t=>`${t.abbr} (${t.val})`).join(", ")}</span>
           </div>
         );
       })()}
