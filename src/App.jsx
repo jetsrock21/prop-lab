@@ -766,7 +766,7 @@ function getGrade(diffPct){ return diffPct >= 5 ? "OVER" : diffPct <= -5 ? "UNDE
 
 // ─── Hit Rate Bar Chart ───────────────────────────────────────────────────────
 function HitRateChart({ logs, h2hLogs, propLine, statType }) {
-  const [activeTab, setActiveTab] = React.useState("L10");
+  const [activeTab, setActiveTab] = useState("L10");
 
   const line = parseFloat(propLine);
   if (!logs || !logs.length || !line || line <= 0) return null;
