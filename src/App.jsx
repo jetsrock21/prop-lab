@@ -773,7 +773,9 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
   if (!logs || !logs.length || !line || line <= 0) return null;
 
   const allGames = logs.map(r => ({
-    stat: parseFloat(r.stat), date: r.date || "", opp: (r.opponent||"").toUpperCase().trim(),
+    stat: parseFloat(r.stat), date: r.date || "",
+    opp: (r.opponent||"").toUpperCase().trim(),
+    min: parseFloat(r.min) || 0,
   })).filter(r => !isNaN(r.stat));
 
   const h2hGames = (h2hLogs || []).map(r => ({
@@ -835,7 +837,7 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
     const ranked = [...dvpData]
       .map(t=>({ abbr:(t.teamAbbr||"").toUpperCase(), val:parseFloat(t[seasonField])||0 }))
       .filter(t=>t.val>0)
-      .sort((a,b)=>b.val-a.val); // rank 1 = lowest allowed (toughest), rank 30 = highest (easiest)
+      .sort((a,b)=>a.val-b.val); // rank 1 = lowest allowed (toughest), rank 30 = highest (easiest)
     const idx = ranked.findIndex(t=>t.abbr===oppAbbr.toUpperCase());
     if (idx===-1) return null;
     return { rank: idx+1, total: ranked.length, val: ranked[idx].val };
