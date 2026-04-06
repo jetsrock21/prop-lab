@@ -767,6 +767,7 @@ function getGrade(diffPct){ return diffPct >= 5 ? "OVER" : diffPct <= -5 ? "UNDE
 // ─── Hit Rate Bar Chart ───────────────────────────────────────────────────────
 function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Opp, l10Opp, l20Opp }) {
   const [activeTab, setActiveTab] = useState("L10");
+  const [selectedBar, setSelectedBar] = useState(null); // {game, rank}
 
   const line = parseFloat(propLine);
   if (!logs || !logs.length || !line || line <= 0) return null;
@@ -824,6 +825,21 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
   const games = (datasets[activeTab] || []).length > 0
     ? datasets[activeTab]
     : datasets["L10"].length > 0 ? datasets["L10"] : allGames;
+
+  // Compute rank for each opponent from dvpData (30=most allowed=easiest, 1=least=hardest)
+  const getOppRank = (oppAbbr) => {
+    if (!dvpData || !dvpData.length || !oppAbbr) return null;
+    const fields = STAT_TO_DVP[statType];
+    if (!fields) return null;
+    const [seasonField] = fields;
+    const ranked = [...dvpData]
+      .map(t=>({ abbr:(t.teamAbbr||"").toUpperCase(), val:parseFloat(t[seasonField])||0 }))
+      .filter(t=>t.val>0)
+      .sort((a,b)=>b.val-a.val); // rank 1 = lowest allowed (toughest), rank 30 = highest (easiest)
+    const idx = ranked.findIndex(t=>t.abbr===oppAbbr.toUpperCase());
+    if (idx===-1) return null;
+    return { rank: idx+1, total: ranked.length, val: ranked[idx].val };
+  };
 
   const hits   = games.filter(g => g.stat >= line).length;
   const avg    = +(games.reduce((a,b) => a + b.stat, 0) / games.length).toFixed(1);
@@ -934,15 +950,22 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
 
         {/* Bars: index 0 = newest = rightmost */}
         {games.map((g, i) => {
-          const x   = PAD.left + (games.length - 1 - i) * gap + gap/2 - barW/2;
-          const hit = g.stat >= line;
-          const bh  = Math.max(3, (g.stat / maxVal) * chartH);
-          const by  = PAD.top + chartH - bh;
-          const col = hit ? "#00e676" : "#ef5350";
+          const x      = PAD.left + (games.length - 1 - i) * gap + gap/2 - barW/2;
+          const hit    = g.stat >= line;
+          const bh     = Math.max(3, (g.stat / maxVal) * chartH);
+          const by     = PAD.top + chartH - bh;
+          const col    = hit ? "#00e676" : "#ef5350";
+          const isSel  = selectedBar && selectedBar.index === i;
           return (
-            <g key={i}>
+            <g key={i} style={{cursor:"pointer"}}
+              onClick={() => {
+                if (isSel) { setSelectedBar(null); return; }
+                const rankInfo = getOppRank(g.opp);
+                setSelectedBar({ game: g, index: i, rankInfo });
+              }}>
               <rect x={x} y={by} width={barW} height={bh}
-                fill={col} fillOpacity={0.82} rx={2}/>
+                fill={col} fillOpacity={isSel ? 1 : 0.82} rx={2}
+                stroke={isSel ? "#fff" : "none"} strokeWidth={isSel ? 1 : 0}/>
               <text x={x+barW/2} y={by-2} textAnchor="middle"
                 fill={col} fontSize="7.5" fontFamily="monospace" fontWeight="700">
                 {Number.isInteger(g.stat)?g.stat:g.stat.toFixed(1)}
@@ -984,6 +1007,37 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
             </>
         }
       </svg>
+
+      {/* Bar detail popup */}
+      {selectedBar && (() => {
+        const { game, rankInfo } = selectedBar;
+        const rankNum = rankInfo?.rank;
+        const rankTotal = rankInfo?.total || 30;
+        // Color: 30 (easiest) = green, 1 (hardest) = red
+        const rankColor = rankNum
+          ? `hsl(${((rankNum-1)/(rankTotal-1))*120},80%,55%)`
+          : "#8ba7c0";
+        return (
+          <div style={{margin:"0.5rem 0",background:"#050d1a",border:"1px solid #1e3a5a",
+            borderRadius:8,padding:"0.6rem 0.85rem",fontFamily:"'JetBrains Mono',monospace",
+            fontSize:"0.7rem",display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.3rem 1rem"}}>
+            {[
+              ["OPP",  game.opp || "—",  "#e8f4fd"],
+              ["DATE", game.date || "—", "#8ba7c0"],
+              ["MINS", game.min != null ? parseFloat(game.min).toFixed(1) : "—", "#8ba7c0"],
+              ["RANK", rankNum
+                ? <span style={{color:rankColor,fontWeight:700}}>{rankNum}</span>
+                : "—",
+              "#e8f4fd"],
+            ].map(([lbl,val,col])=>(
+              <div key={lbl}>
+                <div style={{color:"#2a4060",fontSize:"0.55rem",letterSpacing:"0.1em",marginBottom:"0.1rem"}}>{lbl}</div>
+                <div style={{color:col}}>{val}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Matchup tab: show which teams were included */}
       {activeTab === "Matchup" && matchupGames.length > 0 && dvpData && (() => {
