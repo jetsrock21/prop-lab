@@ -781,32 +781,48 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
 
   // ── Matchup tab: find similar teams by weighted DvP rating ──────────────────
   const buildMatchupGames = () => {
-    if (!dvpData || !dvpData.length || !dvpOpp) return [];
+    if (!dvpData || !dvpData.length || !dvpOpp) {
+      console.log("[Matchup] bail:", {hasDvp:!!dvpData, dvpOpp});
+      return [];
+    }
     const fields = STAT_TO_DVP[statType];
     if (!fields) return [];
     const [seasonField] = fields;
 
-    // Weighted rating for the selected opponent (50/30/20)
     const vals = [
-      { v: parseFloat(l5Opp) || 0,  w: 0.5 },
-      { v: parseFloat(l10Opp) || 0, w: 0.3 },
-      { v: parseFloat(l20Opp) || 0, w: 0.2 },
+      { v: parseFloat(l5Opp)||0,  w:0.5 },
+      { v: parseFloat(l10Opp)||0, w:0.3 },
+      { v: parseFloat(l20Opp)||0, w:0.2 },
     ].filter(x => x.v > 0);
-    if (!vals.length) return [];
-    const totalW = vals.reduce((a, x) => a + x.w, 0);
-    const weightedRating = vals.reduce((a, x) => a + x.v * x.w, 0) / totalW;
 
-    // Find all teams whose season avg is within ±20% of that weighted rating
+    if (!vals.length) {
+      console.log("[Matchup] no opp vals:", {l5Opp,l10Opp,l20Opp});
+      return [];
+    }
+    const totalW = vals.reduce((a,x)=>a+x.w,0);
+    const weightedRating = vals.reduce((a,x)=>a+x.v*x.w,0)/totalW;
+
+    const allTeamVals = dvpData.map(t=>({
+      abbr: (t.teamAbbr||"").toUpperCase(),
+      val:  parseFloat(t[seasonField])||0
+    }));
+
+    console.log("[Matchup] seasonField:", seasonField,
+      "| weightedRating:", weightedRating.toFixed(2),
+      "| sample team keys:", Object.keys(dvpData[0]||{}).slice(0,8),
+      "| sample vals:", allTeamVals.slice(0,4),
+      "| game opps:", [...new Set(allGames.map(g=>g.opp))].slice(0,8)
+    );
+
     const threshold = 0.20;
-    const similarTeams = dvpData
-      .map(t => ({ abbr: (t.teamAbbr||"").toUpperCase(), val: parseFloat(t[seasonField]) || 0 }))
-      .filter(t => t.val > 0 && Math.abs(t.val - weightedRating) / weightedRating <= threshold)
-      .map(t => t.abbr);
+    const similarTeams = allTeamVals
+      .filter(t=>t.val>0 && Math.abs(t.val-weightedRating)/weightedRating<=threshold)
+      .map(t=>t.abbr);
+
+    console.log("[Matchup] similarTeams:", similarTeams);
 
     if (!similarTeams.length) return [];
-
-    // Filter game logs to games vs those similar teams
-    return allGames.filter(g => similarTeams.includes(g.opp));
+    return allGames.filter(g=>similarTeams.includes(g.opp));
   };
 
   const matchupGames = buildMatchupGames();
