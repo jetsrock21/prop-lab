@@ -781,10 +781,7 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
 
   // ── Matchup tab: find similar teams by weighted DvP rating ──────────────────
   const buildMatchupGames = () => {
-    if (!dvpData || !dvpData.length || !dvpOpp) {
-      console.log("[Matchup] bail:", {hasDvp:!!dvpData, dvpOpp});
-      return [];
-    }
+    if (!dvpData || !dvpData.length || !dvpOpp) return [];
     const fields = STAT_TO_DVP[statType];
     if (!fields) return [];
     const [seasonField] = fields;
@@ -794,32 +791,15 @@ function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Op
       { v: parseFloat(l10Opp)||0, w:0.3 },
       { v: parseFloat(l20Opp)||0, w:0.2 },
     ].filter(x => x.v > 0);
+    if (!vals.length) return [];
 
-    if (!vals.length) {
-      console.log("[Matchup] no opp vals:", {l5Opp,l10Opp,l20Opp});
-      return [];
-    }
-    const totalW = vals.reduce((a,x)=>a+x.w,0);
+    const totalW    = vals.reduce((a,x)=>a+x.w,0);
     const weightedRating = vals.reduce((a,x)=>a+x.v*x.w,0)/totalW;
 
-    const allTeamVals = dvpData.map(t=>({
-      abbr: (t.teamAbbr||"").toUpperCase(),
-      val:  parseFloat(t[seasonField])||0
-    }));
-
-    console.log("[Matchup] seasonField:", seasonField,
-      "| weightedRating:", weightedRating.toFixed(2),
-      "| sample team keys:", Object.keys(dvpData[0]||{}).slice(0,8),
-      "| sample vals:", allTeamVals.slice(0,4),
-      "| game opps:", [...new Set(allGames.map(g=>g.opp))].slice(0,8)
-    );
-
-    const threshold = 0.20;
-    const similarTeams = allTeamVals
-      .filter(t=>t.val>0 && Math.abs(t.val-weightedRating)/weightedRating<=threshold)
+    const similarTeams = dvpData
+      .map(t=>({ abbr:(t.teamAbbr||"").toUpperCase(), val:parseFloat(t[seasonField])||0 }))
+      .filter(t=>t.val>0 && Math.abs(t.val-weightedRating)/weightedRating<=0.20)
       .map(t=>t.abbr);
-
-    console.log("[Matchup] similarTeams:", similarTeams);
 
     if (!similarTeams.length) return [];
     return allGames.filter(g=>similarTeams.includes(g.opp));
