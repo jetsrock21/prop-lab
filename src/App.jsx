@@ -765,28 +765,61 @@ function getGrade(diffPct){ return diffPct >= 5 ? "OVER" : diffPct <= -5 ? "UNDE
 
 
 // ─── Hit Rate Bar Chart ───────────────────────────────────────────────────────
-function HitRateChart({ logs, h2hLogs, propLine, statType }) {
+function HitRateChart({ logs, h2hLogs, propLine, statType, dvpData, dvpOpp, l5Opp, l10Opp, l20Opp }) {
   const [activeTab, setActiveTab] = useState("L10");
 
   const line = parseFloat(propLine);
   if (!logs || !logs.length || !line || line <= 0) return null;
 
   const allGames = logs.map(r => ({
-    stat: parseFloat(r.stat), date: r.date || "", opp: r.opponent || "",
+    stat: parseFloat(r.stat), date: r.date || "", opp: (r.opponent||"").toUpperCase().trim(),
   })).filter(r => !isNaN(r.stat));
 
   const h2hGames = (h2hLogs || []).map(r => ({
-    stat: parseFloat(r.stat), date: r.date || "",
+    stat: parseFloat(r.stat), date: r.date || "", opp: "",
   })).filter(r => !isNaN(r.stat));
 
-  const datasets = {
-    "H2H":    h2hGames,
-    "L5":     allGames.slice(0, 5),
-    "L10":    allGames.slice(0, 10),
-    "L20":    allGames.slice(0, 20),
-    "Season": allGames,
+  // ── Matchup tab: find similar teams by weighted DvP rating ──────────────────
+  const buildMatchupGames = () => {
+    if (!dvpData || !dvpData.length || !dvpOpp) return [];
+    const fields = STAT_TO_DVP[statType];
+    if (!fields) return [];
+    const [seasonField] = fields;
+
+    // Weighted rating for the selected opponent (50/30/20)
+    const vals = [
+      { v: parseFloat(l5Opp) || 0,  w: 0.5 },
+      { v: parseFloat(l10Opp) || 0, w: 0.3 },
+      { v: parseFloat(l20Opp) || 0, w: 0.2 },
+    ].filter(x => x.v > 0);
+    if (!vals.length) return [];
+    const totalW = vals.reduce((a, x) => a + x.w, 0);
+    const weightedRating = vals.reduce((a, x) => a + x.v * x.w, 0) / totalW;
+
+    // Find all teams whose season avg is within ±20% of that weighted rating
+    const threshold = 0.20;
+    const similarTeams = dvpData
+      .map(t => ({ abbr: (t.teamAbbr||"").toUpperCase(), val: parseFloat(t[seasonField]) || 0 }))
+      .filter(t => t.val > 0 && Math.abs(t.val - weightedRating) / weightedRating <= threshold)
+      .map(t => t.abbr);
+
+    if (!similarTeams.length) return [];
+
+    // Filter game logs to games vs those similar teams
+    return allGames.filter(g => similarTeams.includes(g.opp));
   };
-  const tabs = ["H2H","L5","L10","L20","Season"];
+
+  const matchupGames = buildMatchupGames();
+
+  const datasets = {
+    "H2H":     h2hGames,
+    "L5":      allGames.slice(0, 5),
+    "L10":     allGames.slice(0, 10),
+    "L20":     allGames.slice(0, 20),
+    "Season":  allGames,
+    "Matchup": matchupGames,
+  };
+  const tabs = ["H2H","L5","L10","L20","Season","Matchup"];
 
   // Resolve active tab — fall back if empty
   const games = (datasets[activeTab] || []).length > 0
@@ -927,18 +960,60 @@ function HitRateChart({ logs, h2hLogs, propLine, statType }) {
           {line}
         </text>
 
-        {/* X axis: oldest left, newest right */}
-        {games.length > 1 && <>
-          <text x={PAD.left+gap/2} y={H-4} textAnchor="middle"
-            fill="#1e3050" fontSize="7.5" fontFamily="monospace">
-            {(games[games.length-1]?.date||"").slice(5)}
-          </text>
-          <text x={PAD.left+chartW-gap/2} y={H-4} textAnchor="middle"
-            fill="#1e3050" fontSize="7.5" fontFamily="monospace">
-            {(games[0]?.date||"").slice(5)}
-          </text>
-        </>}
+        {/* X axis: date under each bar when ≤10 games, else first+last only */}
+        {games.length <= 10
+          ? games.map((g, i) => {
+              const x = PAD.left + (games.length - 1 - i) * gap + gap/2;
+              const label = (g.date||"").slice(5); // MM-DD
+              return label ? (
+                <text key={i} x={x} y={H-4} textAnchor="middle"
+                  fill="#1e3050" fontSize="7" fontFamily="monospace"
+                  transform={`rotate(-35, ${x}, ${H-4})`}>
+                  {label}
+                </text>
+              ) : null;
+            })
+          : games.length > 1 && <>
+              <text x={PAD.left+gap/2} y={H-4} textAnchor="middle"
+                fill="#1e3050" fontSize="7.5" fontFamily="monospace">
+                {(games[games.length-1]?.date||"").slice(5)}
+              </text>
+              <text x={PAD.left+chartW-gap/2} y={H-4} textAnchor="middle"
+                fill="#1e3050" fontSize="7.5" fontFamily="monospace">
+                {(games[0]?.date||"").slice(5)}
+              </text>
+            </>
+        }
       </svg>
+
+      {/* Matchup tab: show which teams were included */}
+      {activeTab === "Matchup" && matchupGames.length > 0 && dvpData && (() => {
+        const fields = STAT_TO_DVP[statType];
+        if (!fields) return null;
+        const [seasonField] = fields;
+        const vals = [
+          { v: parseFloat(l5Opp)||0, w:0.5 },
+          { v: parseFloat(l10Opp)||0, w:0.3 },
+          { v: parseFloat(l20Opp)||0, w:0.2 },
+        ].filter(x=>x.v>0);
+        const totalW = vals.reduce((a,x)=>a+x.w,0);
+        const wr = vals.reduce((a,x)=>a+x.v*x.w,0)/totalW;
+        const similar = dvpData
+          .map(t=>({abbr:(t.teamAbbr||"").toUpperCase(), val:parseFloat(t[seasonField])||0}))
+          .filter(t=>t.val>0 && Math.abs(t.val-wr)/wr<=0.20)
+          .map(t=>t.abbr);
+        return (
+          <div style={{marginTop:"0.5rem",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.58rem",color:"#2a4060",lineHeight:1.6}}>
+            <span style={{color:"#3a6080"}}>Similar to {dvpOpp} ({wr.toFixed(1)} avg allowed): </span>
+            <span style={{color:"#1e3050"}}>{similar.join(", ")}</span>
+          </div>
+        );
+      })()}
+      {activeTab === "Matchup" && matchupGames.length === 0 && (
+        <div style={{marginTop:"0.5rem",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",color:"#2a4060",textAlign:"center"}}>
+          No similar matchups found — try selecting an opponent in the DvP panel first
+        </div>
+      )}
     </div>
   );
 }
@@ -2999,6 +3074,11 @@ export default function App(){
                       h2hLogs={pasteParsedH2H}
                       propLine={activePropLine}
                       statType={logForm.statType||"Points"}
+                      dvpData={dvp.dvpData}
+                      dvpOpp={dvpOpp}
+                      l5Opp={logForm.l5OppAllowed}
+                      l10Opp={logForm.l10OppAllowed}
+                      l20Opp={logForm.l20OppAllowed}
                     />
                   )}
 
