@@ -763,6 +763,205 @@ function getRec(diffPct){
 // getGrade kept for history backward compat — now maps score to letter
 function getGrade(diffPct){ return diffPct >= 5 ? "OVER" : diffPct <= -5 ? "UNDER" : "PUSH"; }
 
+
+// ─── Hit Rate Bar Chart ───────────────────────────────────────────────────────
+function HitRateChart({ logs, h2hLogs, propLine, statType }) {
+  const [window, setWindow] = React.useState("L10");
+  if (!logs || !logs.length || !propLine) return null;
+
+  const line = parseFloat(propLine);
+  if (!line || line <= 0) return null;
+
+  // Build dataset for each window
+  const allGames = logs.map(r => ({
+    stat: parseFloat(r.stat),
+    date: r.date || "",
+    opp:  r.opponent || "",
+  })).filter(r => !isNaN(r.stat));
+
+  const h2hGames = (h2hLogs || []).map(r => ({
+    stat: parseFloat(r.stat),
+    date: r.date || "",
+  })).filter(r => !isNaN(r.stat));
+
+  const datasets = {
+    "H2H": h2hGames,
+    "L5":  allGames.slice(0, 5),
+    "L10": allGames.slice(0, 10),
+    "L20": allGames.slice(0, 20),
+    "Season": allGames,
+  };
+
+  const games = datasets[window] || [];
+  if (!games.length) return null;
+
+  const hits   = games.filter(g => g.stat >= line).length;
+  const hitPct = Math.round((hits / games.length) * 100);
+  const avg    = +(games.reduce((a,b) => a + b.stat, 0) / games.length).toFixed(1);
+  const med    = +([...games].sort((a,b) => a.stat - b.stat)[Math.floor(games.length/2)].stat).toFixed(1);
+
+  // Chart dimensions
+  const W = 340, H = 180, PAD = { top: 28, right: 12, bottom: 48, left: 28 };
+  const chartW = W - PAD.left - PAD.right;
+  const chartH = H - PAD.top  - PAD.bottom;
+
+  const maxVal = Math.max(...games.map(g => g.stat), line) * 1.15;
+  const minVal = 0;
+  const yScale = v => chartH - ((v - minVal) / (maxVal - minVal)) * chartH;
+  const barW   = Math.max(4, Math.min(28, (chartW / games.length) * 0.7));
+  const gap    = chartW / games.length;
+
+  const lineY  = yScale(line);
+
+  // X axis labels: show first and last date only
+  const firstDate = games[games.length - 1]?.date?.slice(5) || "";
+  const lastDate  = games[0]?.date?.slice(5) || "";
+
+  const windows = ["H2H","L5","L10","L20","Season"];
+
+  return (
+    <div style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:12,
+      padding:"1.25rem",marginBottom:"1rem"}}>
+
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+        marginBottom:"0.65rem",paddingBottom:"0.4rem",borderBottom:"1px solid #1e3a5a"}}>
+        <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#4a9eff",
+          fontSize:"0.72rem",letterSpacing:"0.2em",textTransform:"uppercase"}}>
+          Hit Rate Chart
+        </span>
+        <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",color:"#3a6080"}}>
+          line: <span style={{color:"#e8f4fd"}}>{line}</span>
+        </span>
+      </div>
+
+      {/* Toggle tabs */}
+      <div style={{display:"flex",gap:"0.3rem",marginBottom:"0.75rem",flexWrap:"wrap"}}>
+        {windows.map(w => {
+          const d = datasets[w] || [];
+          const disabled = d.length === 0;
+          return (
+            <button key={w} onClick={() => !disabled && setWindow(w)}
+              style={{padding:"0.25rem 0.6rem",
+                background: window===w ? "#4a9eff" : "#0a1628",
+                color: disabled ? "#1e3050" : window===w ? "#050d1a" : "#3a6080",
+                border:`1px solid ${window===w?"#4a9eff":disabled?"#0e2040":"#1e3a5a"}`,
+                borderRadius:5,fontFamily:"'JetBrains Mono',monospace",
+                fontSize:"0.65rem",cursor:disabled?"not-allowed":"pointer",
+                transition:"all 0.15s"}}>
+              {w}
+              {!disabled&&<span style={{marginLeft:"0.3rem",opacity:0.7,fontSize:"0.58rem"}}>
+                ({d.length})
+              </span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Stats row — hit rate % prominent, avg/median smaller below */}
+      <div style={{marginBottom:"0.75rem"}}>
+        {/* Hit rate % row */}
+        <div style={{display:"flex",gap:"1.25rem",flexWrap:"wrap",marginBottom:"0.3rem"}}>
+          {windows.filter(w => (datasets[w]||[]).length > 0).map(w => {
+            const d = datasets[w];
+            const h = d.filter(g => g.stat >= line).length;
+            const pct = Math.round((h / d.length) * 100);
+            const col = pct>=60?"#00e676":pct>=50?"#ffee58":"#ff7043";
+            return (
+              <div key={w} style={{textAlign:"center"}}>
+                <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.6rem",letterSpacing:"0.08em"}}>{w}</div>
+                <div style={{color:col,fontFamily:"'Black Han Sans',sans-serif",fontSize:"1.1rem",lineHeight:1.1}}>{pct}%</div>
+              </div>
+            );
+          })}
+        </div>
+        {/* Avg / median for current window */}
+        <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.68rem",color:"#3a6080",marginTop:"0.25rem"}}>
+          Average <span style={{color:"#e8f4fd",fontWeight:700}}>{avg}</span>
+          <span style={{margin:"0 0.5rem"}}>·</span>
+          Median <span style={{color:"#e8f4fd",fontWeight:700}}>{med}</span>
+        </div>
+      </div>
+
+      {/* SVG Chart */}
+      <div style={{overflowX:"auto"}}>
+        <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:"block"}}>
+          {/* Background zones */}
+          <rect x={PAD.left} y={PAD.top} width={chartW} height={lineY}
+            fill="#00e67608" rx={2}/>
+          <rect x={PAD.left} y={PAD.top + lineY} width={chartW} height={chartH - lineY}
+            fill="#ff704308" rx={2}/>
+
+          {/* Y axis gridlines */}
+          {[0, 0.25, 0.5, 0.75, 1].map(t => {
+            const val = minVal + t * (maxVal - minVal);
+            const y   = PAD.top + yScale(val);
+            return (
+              <g key={t}>
+                <line x1={PAD.left} y1={y} x2={PAD.left+chartW} y2={y}
+                  stroke="#0e2040" strokeWidth="1"/>
+                <text x={PAD.left-4} y={y+3} textAnchor="end"
+                  fill="#2a4060" fontSize="8" fontFamily="monospace">
+                  {Math.round(val)}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Bars — games[0] is newest, render right-to-left */}
+          {games.map((g, i) => {
+            const x   = PAD.left + (games.length - 1 - i) * gap + gap/2 - barW/2;
+            const hit = g.stat >= line;
+            const bh  = Math.max(2, ((g.stat - minVal)/(maxVal - minVal)) * chartH);
+            const by  = PAD.top + chartH - bh;
+            return (
+              <g key={i}>
+                <rect x={x} y={by} width={barW} height={bh}
+                  fill={hit ? "#00e676" : "#ff7043"}
+                  fillOpacity={0.85} rx={2}/>
+                <text x={x + barW/2} y={by - 3} textAnchor="middle"
+                  fill={hit ? "#00e676" : "#ff7043"}
+                  fontSize="8" fontFamily="monospace" fontWeight="600">
+                  {g.stat % 1 === 0 ? g.stat : g.stat.toFixed(1)}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Prop line */}
+          <line x1={PAD.left} y1={PAD.top + lineY}
+            x2={PAD.left + chartW} y2={PAD.top + lineY}
+            stroke="#e8f4fd" strokeWidth="1.5" strokeDasharray="4 3"/>
+          <text x={PAD.left + chartW + 3} y={PAD.top + lineY + 4}
+            fill="#e8f4fd" fontSize="9" fontFamily="monospace" fontWeight="700">
+            {line}
+          </text>
+
+          {/* X axis date labels (first and last only) */}
+          {games.length > 1 && (
+            <>
+              <text x={PAD.left + gap/2} y={H - 6}
+                textAnchor="middle" fill="#2a4060" fontSize="8" fontFamily="monospace">
+                {games[games.length-1]?.date?.slice(5)||""}
+              </text>
+              <text x={PAD.left + chartW - gap/2} y={H - 6}
+                textAnchor="middle" fill="#2a4060" fontSize="8" fontFamily="monospace">
+                {games[0]?.date?.slice(5)||""}
+              </text>
+            </>
+          )}
+          {games.length === 1 && (
+            <text x={PAD.left + chartW/2} y={H-6}
+              textAnchor="middle" fill="#2a4060" fontSize="8" fontFamily="monospace">
+              {games[0]?.date?.slice(5)||""}
+            </text>
+          )}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 // UI COMPONENTS
 // ═══════════════════════════════════════════════════════════════
@@ -2810,6 +3009,16 @@ export default function App(){
                         </div>
                       )}
                     </div>
+                  )}
+
+                  {/* HIT RATE CHART */}
+                  {inputMode==="gamelog"&&pasteParsedLogs.length>0&&activePropLine&&(
+                    <HitRateChart
+                      logs={pasteParsedLogs}
+                      h2hLogs={pasteParsedH2H}
+                      propLine={activePropLine}
+                      statType={logForm.statType||"Points"}
+                    />
                   )}
 
                   {/* DISTRIBUTION CHART */}
