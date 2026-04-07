@@ -7,6 +7,7 @@ Scrapes basketball-reference.com for game logs — works from any server,
 no API key needed, no IP blocking.
 """
 
+import os
 import re
 import threading
 import asyncio
