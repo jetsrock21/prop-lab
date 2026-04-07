@@ -2054,25 +2054,11 @@ function EdgeFinder({ apiBase, onAnalyze }) {
     setPropsLoad(true); setPropsErr("");
 
     try {
-      // Fetch props + positions in parallel
-      const [propsR, awayPosR, homePosR] = await Promise.all([
-        fetch(`${apiBase}/edge/odds?gameID=${encodeURIComponent(game.gameID)}`),
-        fetch(`${apiBase}/edge/positions?teamAbv=${game.away}`),
-        fetch(`${apiBase}/edge/positions?teamAbv=${game.home}`),
-      ]);
-
-      const propsData = propsR.ok ? await propsR.json() : [];
-      const awayPos   = awayPosR.ok ? await awayPosR.json() : {};
-      const homePos   = homePosR.ok ? await homePosR.json() : {};
-      const allPos    = { ...awayPos, ...homePos };
-
+      const r = await fetch(`${apiBase}/edge/odds?gameID=${encodeURIComponent(game.gameID)}`);
+      if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail||`HTTP ${r.status}`); }
+      const propsData = await r.json();
       setProps(Array.isArray(propsData) ? propsData : []);
-      setPositions(allPos);
-
-      if (!propsData.length) {
-        // Try raw debug to understand structure
-        setPropsErr("No props found — odds may not be available yet for this game.");
-      }
+      if (!propsData.length) setPropsErr("No props found — game may not have odds yet.");
     } catch(e) {
       setPropsErr(e.message||"Failed to load props");
     } finally {
@@ -2235,7 +2221,7 @@ function EdgeFinder({ apiBase, onAnalyze }) {
           {filteredProps.map((prop, idx) => {
             const key = `${prop.playerName}|${prop.statType}`;
             const m   = models[key];
-            const pos = positions[prop.playerName] || "SF";
+            const pos = prop.position || "SF";
             const scoreCol = m?.score!=null ? scoreColor(m.score) : "#3a6080";
 
             return (
