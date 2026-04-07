@@ -803,7 +803,7 @@ async def get_odds(gameID: str = Query(...)):
     async with httpx.AsyncClient(timeout=20) as client:
         odds_r, away_r, home_r = await asyncio.gather(
             client.get(f"{TANK01_BASE}/getNBABettingOdds",
-                      params={"gameDate": date_part}, headers=tank01_headers()),
+                      params={"gameDate": date_part, "playerProps": "true", "itemFormat": "list"}, headers=tank01_headers()),
             client.get(f"{TANK01_BASE}/getNBATeamRoster",
                       params={"teamAbv": away_team}, headers=tank01_headers()),
             client.get(f"{TANK01_BASE}/getNBATeamRoster",
@@ -890,7 +890,8 @@ async def get_odds_raw(gameID: str = Query(...)):
 
     async with httpx.AsyncClient(timeout=20) as client:
         odds_r   = await client.get(f"{TANK01_BASE}/getNBABettingOdds",
-                     params={"gameDate": date_part}, headers=tank01_headers())
+                     params={"gameDate": date_part, "playerProps": "true", "itemFormat": "list"},
+                     headers=tank01_headers())
         roster_r = await client.get(f"{TANK01_BASE}/getNBATeamRoster",
                      params={"teamAbv": away_team}, headers=tank01_headers())
 
