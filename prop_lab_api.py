@@ -880,49 +880,36 @@ async def get_odds(gameID: str = Query(...)):
 
 @app.get("/edge/odds/raw")
 async def get_odds_raw(gameID: str = Query(...)):
-    """Debug: return raw Tank01 getNBAGamesAndStats response."""
+    """Debug: return completely raw Tank01 response."""
     if not RAPIDAPI_KEY:
-        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set.")
-    url = f"{TANK01_BASE}/getNBAGamesAndStats"
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(url, params={"gameID": gameID}, headers=tank01_headers())
-        r.raise_for_status()
-        data = r.json()
-    # Return just the keys and first playerProps entry to keep it readable
-    body = data.get("body", {})
-    games = body if isinstance(body, list) else [body]
-    debug = []
-    for g in games:
-        debug.append({
-            "gameID": g.get("gameID"),
-            "keys": list(g.keys()),
-            "playerProps_count": len(g.get("playerProps", [])),
-            "first_prop": g.get("playerProps", [{}])[0] if g.get("playerProps") else None,
-        })
-    return {"raw_status": r.status_code, "games": debug, "body_type": type(body).__name__}
+        return {"error": "RAPIDAPI_KEY not set"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(
+                f"{TANK01_BASE}/getNBAGamesAndStats",
+                params={"gameID": gameID},
+                headers=tank01_headers()
+            )
+        return {"status": r.status_code, "raw": r.json()}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/edge/odds/raw2")
 async def get_odds_raw2(gameDate: str = Query(...)):
-    """Debug: call getNBAGamesAndStats with gameDate instead of gameID."""
+    """Debug: getNBAGamesAndStats with gameDate."""
     if not RAPIDAPI_KEY:
-        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set.")
-    url = f"{TANK01_BASE}/getNBAGamesAndStats"
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(url, params={"gameDate": gameDate}, headers=tank01_headers())
-        r.raise_for_status()
-        data = r.json()
-    body = data.get("body", {})
-    games = body if isinstance(body, list) else list(body.values()) if isinstance(body, dict) else [body]
-    debug = []
-    for g in (games[:2] if isinstance(games, list) else [games]):
-        debug.append({
-            "gameID": g.get("gameID") if isinstance(g, dict) else "?",
-            "keys": list(g.keys()) if isinstance(g, dict) else [],
-            "playerProps_count": len(g.get("playerProps", [])) if isinstance(g, dict) else 0,
-            "first_prop": g.get("playerProps", [{}])[0] if isinstance(g, dict) and g.get("playerProps") else None,
-        })
-    return {"raw_status": r.status_code, "body_type": type(body).__name__, "games": debug}
+        return {"error": "RAPIDAPI_KEY not set"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(
+                f"{TANK01_BASE}/getNBAGamesAndStats",
+                params={"gameDate": gameDate},
+                headers=tank01_headers()
+            )
+        return {"status": r.status_code, "raw": r.json()}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/edge/positions")
