@@ -672,3 +672,207 @@ async def debug_player(player_id: int, season: str = Query("2025-26")):
             re.search(r'id="player_game_log_reg"[^>]*>(.*?)</table>', r.text, re.DOTALL)
         ),
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# EDGE FINDER — Tank01 / RapidAPI endpoints
+# ═══════════════════════════════════════════════════════════════
+
+RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
+TANK01_HOST   = "tank01-fantasy-stats.p.rapidapi.com"
+TANK01_BASE   = f"https://{TANK01_HOST}"
+
+def tank01_headers():
+    return {
+        "x-rapidapi-key":  RAPIDAPI_KEY,
+        "x-rapidapi-host": TANK01_HOST,
+        "Accept":          "application/json",
+    }
+
+# ── Cache ────────────────────────────────────────────────────────
+_schedule_cache = {}   # date → games list
+_odds_cache     = {}   # gameID → odds
+_roster_cache   = {}   # teamAbv → {playerName: position}
+
+
+@app.get("/edge/schedule")
+async def get_schedule(gameDate: str = Query(...)):
+    """
+    Get NBA games for a date (YYYYMMDD).
+    Returns list of {gameID, away, home, gameTime}.
+    """
+    if gameDate in _schedule_cache:
+        return _schedule_cache[gameDate]
+
+    if not RAPIDAPI_KEY:
+        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set in environment.")
+
+    url = f"{TANK01_BASE}/getNBAScoresOnly"
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(url, params={"gameDate": gameDate, "topPerformers": "false"},
+                             headers=tank01_headers())
+        r.raise_for_status()
+        data = r.json()
+
+    games = []
+    body = data.get("body", {})
+    # body is a dict keyed by gameID
+    for gid, g in (body.items() if isinstance(body, dict) else []):
+        games.append({
+            "gameID":   gid,
+            "away":     g.get("away", ""),
+            "home":     g.get("home", ""),
+            "gameTime": g.get("gameTime", ""),
+            "gameStatus": g.get("gameStatus", ""),
+        })
+
+    games.sort(key=lambda x: x.get("gameTime",""))
+    _schedule_cache[gameDate] = games
+    return games
+
+
+@app.get("/edge/odds")
+async def get_odds(gameID: str = Query(...)):
+    """
+    Get player props for a specific game.
+    Returns list of {playerName, statType, line, overOdds, underOdds}.
+    """
+    if gameID in _odds_cache:
+        return _odds_cache[gameID]
+
+    if not RAPIDAPI_KEY:
+        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set in environment.")
+
+    url = f"{TANK01_BASE}/getNBABettingOdds"
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(url, params={"gameID": gameID}, headers=tank01_headers())
+        r.raise_for_status()
+        data = r.json()
+
+    # Parse player props from response
+    props = []
+    body = data.get("body", {})
+
+    # Tank01 returns odds nested under gameID key
+    game_odds = body.get(gameID, body) if isinstance(body, dict) else {}
+
+    # Player props are under "playerPropBets" or similar
+    player_props = (
+        game_odds.get("playerPropBets") or
+        game_odds.get("propBets") or
+        game_odds.get("playerProps") or
+        []
+    )
+
+    # Map Tank01 stat names → our stat type names
+    STAT_MAP = {
+        "pts":        "Points",
+        "points":     "Points",
+        "reb":        "Rebounds",
+        "rebounds":   "Rebounds",
+        "ast":        "Assists",
+        "assists":    "Assists",
+        "3pm":        "3-Pointers",
+        "threes":     "3-Pointers",
+        "blk":        "Blocks",
+        "blocks":     "Blocks",
+        "stl":        "Steals",
+        "steals":     "Steals",
+        "pts+reb+ast": "PRA",
+        "pra":        "PRA",
+        "pts+reb":    "PR",
+        "pts+ast":    "PA",
+        "reb+ast":    "RA",
+    }
+
+    if isinstance(player_props, list):
+        for prop in player_props:
+            raw_stat = (prop.get("propType") or prop.get("stat") or "").lower().strip()
+            stat_type = STAT_MAP.get(raw_stat)
+            if not stat_type:
+                continue
+            player_name = prop.get("playerName") or prop.get("name") or ""
+            line = prop.get("propLine") or prop.get("line") or prop.get("value")
+            try:
+                line = float(line)
+            except Exception:
+                continue
+            props.append({
+                "playerName": player_name,
+                "statType":   stat_type,
+                "line":       line,
+                "overOdds":   prop.get("overOdds") or prop.get("over") or -110,
+                "underOdds":  prop.get("underOdds") or prop.get("under") or -110,
+            })
+    elif isinstance(player_props, dict):
+        # Sometimes keyed by player name
+        for pname, pdata in player_props.items():
+            if not isinstance(pdata, dict):
+                continue
+            for raw_stat, details in pdata.items():
+                stat_type = STAT_MAP.get(raw_stat.lower().strip())
+                if not stat_type or not isinstance(details, dict):
+                    continue
+                line = details.get("propLine") or details.get("line")
+                try:
+                    line = float(line)
+                except Exception:
+                    continue
+                props.append({
+                    "playerName": pname,
+                    "statType":   stat_type,
+                    "line":       line,
+                    "overOdds":   details.get("overOdds") or -110,
+                    "underOdds":  details.get("underOdds") or -110,
+                })
+
+    _odds_cache[gameID] = props
+    return props
+
+
+@app.get("/edge/odds/raw")
+async def get_odds_raw(gameID: str = Query(...)):
+    """Debug: return raw Tank01 odds response so we can see the exact structure."""
+    if not RAPIDAPI_KEY:
+        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set.")
+    url = f"{TANK01_BASE}/getNBABettingOdds"
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(url, params={"gameID": gameID}, headers=tank01_headers())
+        r.raise_for_status()
+        return r.json()
+
+
+@app.get("/edge/positions")
+async def get_positions(teamAbv: str = Query(...)):
+    """
+    Get player positions for a team roster.
+    Returns {playerName: position} dict.
+    """
+    ta = teamAbv.upper()
+    if ta in _roster_cache:
+        return _roster_cache[ta]
+
+    if not RAPIDAPI_KEY:
+        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set.")
+
+    url = f"{TANK01_BASE}/getNBATeamRoster"
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(url, params={"teamAbv": ta}, headers=tank01_headers())
+        r.raise_for_status()
+        data = r.json()
+
+    positions = {}
+    roster = data.get("body", {}).get("roster", [])
+    if isinstance(roster, list):
+        for p in roster:
+            name = p.get("longName") or p.get("name") or ""
+            pos  = p.get("pos") or p.get("position") or ""
+            # Normalize to our position tabs: PG, SG, SF, PF, C
+            pos_map = {
+                "PG": "PG", "SG": "SG", "SF": "SF", "PF": "PF", "C": "C",
+                "G": "PG", "F": "SF", "G-F": "SG", "F-G": "SF", "F-C": "PF", "C-F": "C",
+            }
+            positions[name] = pos_map.get(pos, pos or "SF")
+
+    _roster_cache[ta] = positions
+    return positions
