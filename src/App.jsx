@@ -2012,6 +2012,313 @@ function DvPPanel({ statType, dvp, onFill, currentOpp, onOppChange }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// EDGE FINDER COMPONENT
+// ═══════════════════════════════════════════════════════════════
+function EdgeFinder({ apiBase, onAnalyze }) {
+  const [gameDate,   setGameDate]   = useState(() => {
+    const d = new Date();
+    return d.toISOString().slice(0,10).replace(/-/g,"");
+  });
+  const [games,      setGames]      = useState([]);
+  const [gamesLoad,  setGamesLoad]  = useState(false);
+  const [gamesErr,   setGamesErr]   = useState("");
+  const [selGame,    setSelGame]    = useState(null);
+  const [props,      setProps]      = useState([]);
+  const [propsLoad,  setPropsLoad]  = useState(false);
+  const [propsErr,   setPropsErr]   = useState("");
+  const [positions,  setPositions]  = useState({});  // playerName → position
+  const [models,     setModels]     = useState({});   // key → {score, proj, loading, err}
+  const [filter,     setFilter]     = useState("All");
+
+  const STAT_FILTERS = ["All","Points","Rebounds","Assists","3-Pointers","PRA","Blocks","Steals"];
+
+  // ── Fetch today's schedule ───────────────────────────────────
+  const loadGames = async (date) => {
+    setGamesLoad(true); setGamesErr(""); setGames([]);
+    setSelGame(null); setProps([]); setModels({});
+    try {
+      const r = await fetch(`${apiBase}/edge/schedule?gameDate=${date}`);
+      if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail||`HTTP ${r.status}`); }
+      const data = await r.json();
+      setGames(Array.isArray(data) ? data : []);
+      if (!data.length) setGamesErr("No games found for this date.");
+    } catch(e) { setGamesErr(e.message||"Failed to load schedule"); }
+    finally { setGamesLoad(false); }
+  };
+
+  useEffect(() => { loadGames(gameDate); }, []);
+
+  // ── Fetch props for selected game ───────────────────────────
+  const loadProps = async (game) => {
+    setSelGame(game); setProps([]); setModels({});
+    setPropsLoad(true); setPropsErr("");
+
+    try {
+      // Fetch props + positions in parallel
+      const [propsR, awayPosR, homePosR] = await Promise.all([
+        fetch(`${apiBase}/edge/odds?gameID=${encodeURIComponent(game.gameID)}`),
+        fetch(`${apiBase}/edge/positions?teamAbv=${game.away}`),
+        fetch(`${apiBase}/edge/positions?teamAbv=${game.home}`),
+      ]);
+
+      const propsData = propsR.ok ? await propsR.json() : [];
+      const awayPos   = awayPosR.ok ? await awayPosR.json() : {};
+      const homePos   = homePosR.ok ? await homePosR.json() : {};
+      const allPos    = { ...awayPos, ...homePos };
+
+      setProps(Array.isArray(propsData) ? propsData : []);
+      setPositions(allPos);
+
+      if (!propsData.length) {
+        // Try raw debug to understand structure
+        setPropsErr("No props found — odds may not be available yet for this game.");
+      }
+    } catch(e) {
+      setPropsErr(e.message||"Failed to load props");
+    } finally {
+      setPropsLoad(false); }
+  };
+
+  // ── Lazy-load model score for a prop ────────────────────────
+  const loadModelForProp = async (prop) => {
+    const key = `${prop.playerName}|${prop.statType}`;
+    if (models[key]) return;
+
+    setModels(m => ({...m, [key]: {loading: true}}));
+
+    try {
+      // 1. Find player ID from search
+      const sr = await fetch(`${apiBase}/players/search?q=${encodeURIComponent(prop.playerName.split(" ").slice(-1)[0])}`);
+      const players = sr.ok ? await sr.json() : [];
+      const match = players.find(p =>
+        p.full_name.toLowerCase() === prop.playerName.toLowerCase() ||
+        p.full_name.toLowerCase().includes(prop.playerName.toLowerCase().split(" ").slice(-1)[0])
+      );
+      if (!match) throw new Error("Player not found");
+
+      // 2. Load game logs
+      const lr = await fetch(`${apiBase}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(prop.statType)}&season=2025-26`);
+      if (!lr.ok) throw new Error("Could not load game logs");
+      const logData = await lr.json();
+
+      const logs = (logData.recent_logs||[]).slice(0,20);
+      if (!logs.length) throw new Error("No logs");
+
+      // 3. Simple projection: weighted mean (50/30/20 on L5/L10/L20)
+      const calc = (n) => {
+        const w = logs.slice(0,n).map(r=>parseFloat(r.stat)||0);
+        return w.length ? w.reduce((a,b)=>a+b,0)/w.length : 0;
+      };
+      const l5=calc(5), l10=calc(10), l20=calc(20);
+      const proj = +((l5*0.5 + l10*0.3 + l20*0.2)).toFixed(1);
+      const diffPct = ((proj - prop.line) / prop.line) * 100;
+
+      // 4. Simple score without full Monte Carlo (fast)
+      const cv = STAT_CV[prop.statType] || 0.35;
+      const edgeNorm = clamp((diffPct/100)/cv, -1, 1);
+      const overEst  = clamp(0.5 + edgeNorm*0.4, 0.05, 0.95);
+      const score    = Math.round(clamp(50 + edgeNorm*45, 0, 100));
+
+      setModels(m => ({...m, [key]: {
+        loading: false, score, proj, diffPct: +diffPct.toFixed(1),
+        overEst: +(overEst*100).toFixed(0), playerId: match.id,
+        l5, l10, l20,
+      }}));
+    } catch(e) {
+      setModels(m => ({...m, [key]: {loading: false, err: e.message}}));
+    }
+  };
+
+  // Load models for visible props
+  useEffect(() => {
+    const visible = props.filter(p => filter==="All" || p.statType===filter);
+    visible.forEach(p => loadModelForProp(p));
+  }, [props, filter]);
+
+  const displayDate = gameDate.length===8
+    ? `${gameDate.slice(4,6)}/${gameDate.slice(6,8)}/${gameDate.slice(0,4)}`
+    : gameDate;
+
+  const filteredProps = props.filter(p => filter==="All" || p.statType===filter);
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:12,
+        padding:"1rem 1.25rem",marginBottom:"1rem"}}>
+        <div style={{fontFamily:"'Black Han Sans',sans-serif",color:"#4a9eff",
+          fontSize:"0.72rem",letterSpacing:"0.2em",textTransform:"uppercase",
+          marginBottom:"0.75rem"}}>⚡ Edge Finder</div>
+
+        {/* Date picker */}
+        <div style={{display:"flex",gap:"0.5rem",alignItems:"center",marginBottom:"0.75rem"}}>
+          <input type="date"
+            value={`${gameDate.slice(0,4)}-${gameDate.slice(4,6)}-${gameDate.slice(6,8)}`}
+            onChange={e => {
+              const d = e.target.value.replace(/-/g,"");
+              setGameDate(d); loadGames(d);
+            }}
+            style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:6,
+              color:"#e8f4fd",padding:"0.45rem 0.65rem",fontFamily:"'JetBrains Mono',monospace",
+              fontSize:"0.78rem",flex:1,outline:"none"}}
+          />
+          <button onClick={()=>loadGames(gameDate)}
+            style={{padding:"0.45rem 0.9rem",background:"#1e3a5a",border:"none",
+              borderRadius:6,color:"#4a9eff",fontFamily:"'Black Han Sans',sans-serif",
+              fontSize:"0.72rem",letterSpacing:"0.1em",cursor:"pointer"}}>
+            ↺
+          </button>
+        </div>
+
+        {/* Games list */}
+        {gamesLoad&&<div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem"}}>Loading games...</div>}
+        {gamesErr&&<div style={{color:"#ff7043",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem"}}>{gamesErr}</div>}
+        {!gamesLoad&&games.length>0&&(
+          <div style={{display:"flex",flexDirection:"column",gap:"0.4rem"}}>
+            {games.map(g=>(
+              <button key={g.gameID} onClick={()=>loadProps(g)}
+                style={{padding:"0.55rem 0.75rem",background:selGame?.gameID===g.gameID?"#1e3a5a":"#0a1628",
+                  border:`1px solid ${selGame?.gameID===g.gameID?"#4a9eff":"#1e3a5a"}`,
+                  borderRadius:7,cursor:"pointer",display:"flex",justifyContent:"space-between",
+                  alignItems:"center"}}>
+                <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",
+                  fontSize:"0.85rem",letterSpacing:"0.05em"}}>
+                  {g.away} <span style={{color:"#3a6080",fontSize:"0.7rem"}}>@</span> {g.home}
+                </span>
+                <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",fontSize:"0.62rem"}}>
+                  {g.gameTime||g.gameStatus||""}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Props panel */}
+      {selGame&&(
+        <div>
+          {/* Stat filter */}
+          <div style={{display:"flex",gap:"0.3rem",flexWrap:"wrap",marginBottom:"0.75rem"}}>
+            {STAT_FILTERS.map(f=>(
+              <button key={f} onClick={()=>setFilter(f)}
+                style={{padding:"0.25rem 0.6rem",
+                  background:filter===f?"#4a9eff":"#0a1628",
+                  color:filter===f?"#050d1a":"#3a6080",
+                  border:`1px solid ${filter===f?"#4a9eff":"#1e3a5a"}`,
+                  borderRadius:5,fontFamily:"'JetBrains Mono',monospace",
+                  fontSize:"0.62rem",cursor:"pointer"}}>
+                {f}
+              </button>
+            ))}
+          </div>
+
+          {propsLoad&&(
+            <div style={{textAlign:"center",padding:"2rem",color:"#3a6080",
+              fontFamily:"'JetBrains Mono',monospace",fontSize:"0.75rem"}}>
+              Loading props...
+            </div>
+          )}
+          {propsErr&&(
+            <div style={{color:"#ff7043",fontFamily:"'JetBrains Mono',monospace",
+              fontSize:"0.7rem",padding:"0.5rem",background:"#1a0a08",borderRadius:6,
+              marginBottom:"0.5rem"}}>{propsErr}</div>
+          )}
+
+          {!propsLoad&&filteredProps.length===0&&!propsErr&&(
+            <div style={{textAlign:"center",padding:"2rem",color:"#2a4060",
+              fontFamily:"'JetBrains Mono',monospace",fontSize:"0.75rem"}}>
+              No {filter!=="All"?filter+" ":""} props available
+            </div>
+          )}
+
+          {/* Prop cards */}
+          {filteredProps.map((prop, idx) => {
+            const key = `${prop.playerName}|${prop.statType}`;
+            const m   = models[key];
+            const pos = positions[prop.playerName] || "SF";
+            const scoreCol = m?.score!=null ? scoreColor(m.score) : "#3a6080";
+
+            return (
+              <div key={idx}
+                style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:10,
+                  padding:"0.85rem 1rem",marginBottom:"0.5rem",
+                  cursor: m&&!m.loading&&!m.err ? "pointer" : "default",
+                  transition:"border-color 0.15s"}}
+                onClick={() => m&&!m.loading&&!m.err && onAnalyze(
+                  prop.playerName, prop.statType, prop.line, pos
+                )}
+                onMouseEnter={e=>{ if(m&&!m.loading) e.currentTarget.style.borderColor="#1e3a5a"; }}
+                onMouseLeave={e=>{ e.currentTarget.style.borderColor="#0e2040"; }}
+              >
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",
+                      fontSize:"0.95rem",letterSpacing:"0.04em"}}>{prop.playerName}</div>
+                    <div style={{display:"flex",gap:"0.5rem",alignItems:"center",marginTop:"0.25rem",flexWrap:"wrap"}}>
+                      <span style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:4,
+                        padding:"0.1rem 0.45rem",fontFamily:"'JetBrains Mono',monospace",
+                        fontSize:"0.6rem",color:"#4a9eff"}}>{prop.statType}</span>
+                      <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",fontSize:"0.68rem"}}>
+                        line <span style={{color:"#e8f4fd",fontWeight:700}}>{prop.line}</span>
+                      </span>
+                      {m?.proj!=null&&(
+                        <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",fontSize:"0.68rem"}}>
+                          proj <span style={{color:m.diffPct>=0?"#00e676":"#ff7043",fontWeight:700}}>{m.proj}</span>
+                        </span>
+                      )}
+                      <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#2a4060",fontSize:"0.6rem"}}>
+                        {pos}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Score badge */}
+                  <div style={{marginLeft:"0.75rem",textAlign:"center",minWidth:44}}>
+                    {m?.loading&&(
+                      <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.6rem"}}>...</div>
+                    )}
+                    {m?.err&&(
+                      <div style={{color:"#2a4060",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",maxWidth:60,textAlign:"right"}}>—</div>
+                    )}
+                    {m?.score!=null&&!m.loading&&(
+                      <div>
+                        <div style={{fontFamily:"'Black Han Sans',sans-serif",
+                          fontSize:"1.6rem",color:scoreCol,lineHeight:1,
+                          textShadow:`0 0 12px ${scoreCol}60`}}>
+                          {m.score}
+                        </div>
+                        <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.52rem",
+                          color:scoreCol,opacity:0.8,marginTop:"0.1rem"}}>
+                          {scoreLabel(m.score)}
+                        </div>
+                        {m.diffPct!=null&&(
+                          <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",
+                            color:m.diffPct>=0?"#00e676":"#ff7043",marginTop:"0.1rem"}}>
+                            {m.diffPct>=0?"+":""}{m.diffPct}%
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {m?.score!=null&&!m.loading&&(
+                  <div style={{marginTop:"0.4rem",color:"#2a4060",fontFamily:"'JetBrains Mono',monospace",
+                    fontSize:"0.55rem"}}>
+                    tap to analyze in Game Logs →
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════
 const EMPTY_FORM={playerName:"",statType:"Points",prop:"",
@@ -2021,7 +2328,7 @@ const EMPTY_FORM={playerName:"",statType:"Points",prop:"",
 const EMPTY_LOG={logs:[{min:"",stat:""},{min:"",stat:""},{min:"",stat:""}],h2hLogs:[],projMin:"",l5OppAllowed:"",l10OppAllowed:"",l20OppAllowed:"",leagueAvgAllowed:""};
 
 export default function App(){
-  const [mainTab,setMainTab]=useState("lab");       // lab | history
+  const [mainTab,setMainTab]=useState("lab");       // lab | edge | history
   const [inputMode,setInputMode]=useState("summary"); // summary | gamelog
   const [form,setForm]=useState(EMPTY_FORM);
   const [logForm,setLogForm]=useState(EMPTY_LOG);
@@ -2356,7 +2663,7 @@ export default function App(){
               <p style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.68rem",letterSpacing:"0.05em"}}>STAT/MIN · MONTE CARLO · GAME LOG ENGINE</p>
             </div>
             <div style={{display:"flex",background:"#080f1e",border:"1px solid #0e2040",borderRadius:8,overflow:"hidden"}}>
-              {[["lab","🔬 Lab"],["history",`📋 Hist${history.length?` (${history.length})`:""}`]].map(([t,label])=>(
+              {[["lab","🔬 Lab"],["edge","⚡ Edge"],["history",`📋 Hist${history.length?` (${history.length})`:""}`]].map(([t,label])=>(
                 <button key={t} onClick={()=>setMainTab(t)} style={{padding:"0.5rem 0.9rem",background:mainTab===t?"#4a9eff":"transparent",color:mainTab===t?"#050d1a":"#3a6080",border:"none",fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.72rem",letterSpacing:"0.1em",textTransform:"uppercase",cursor:"pointer",transition:"all 0.15s"}}>{label}</button>
               ))}
             </div>
@@ -3252,6 +3559,20 @@ export default function App(){
                 </div>
               )}
             </>
+          )}
+
+          {/* ══ EDGE FINDER ══ */}
+          {mainTab==="edge"&&(
+            <EdgeFinder apiBase={API_BASE} onAnalyze={(player, statType, line, position) => {
+              // Pre-populate Game Logs and switch to lab
+              setMainTab("lab");
+              setInputMode("gamelog");
+              setLogForm(f=>({...f, statType, propLine:String(line), playerName:player}));
+              nba.setPlayerName(player);
+              nba.setLoaded(false);
+              dvp.setPosition(position||"PG");
+              window.scrollTo({top:0,behavior:"smooth"});
+            }}/>
           )}
 
           {/* ══ HISTORY ══ */}
