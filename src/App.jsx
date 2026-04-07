@@ -2069,57 +2069,113 @@ function EdgeFinder({ apiBase, onAnalyze }) {
   const loadModelForProp = async (prop) => {
     const key = `${prop.playerName}|${prop.statType}`;
     if (models[key]) return;
-
     setModels(m => ({...m, [key]: {loading: true}}));
 
     try {
-      // 1. Find player ID from search
-      const sr = await fetch(`${apiBase}/players/search?q=${encodeURIComponent(prop.playerName.split(" ").slice(-1)[0])}`);
+      // 1. Search by full name for accuracy
+      const lastName = prop.playerName.split(" ").slice(-1)[0];
+      const sr = await fetch(`${apiBase}/players/search?q=${encodeURIComponent(lastName)}`);
       const players = sr.ok ? await sr.json() : [];
-      const match = players.find(p =>
-        p.full_name.toLowerCase() === prop.playerName.toLowerCase() ||
-        p.full_name.toLowerCase().includes(prop.playerName.toLowerCase().split(" ").slice(-1)[0])
-      );
-      if (!match) throw new Error("Player not found");
+      // Exact match first, then partial
+      const match = players.find(p => p.full_name.toLowerCase() === prop.playerName.toLowerCase())
+                 || players.find(p => p.full_name.toLowerCase().includes(prop.playerName.toLowerCase()));
+      if (!match) throw new Error(`Player not found: ${prop.playerName}`);
 
       // 2. Load game logs
       const lr = await fetch(`${apiBase}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(prop.statType)}&season=2025-26`);
       if (!lr.ok) throw new Error("Could not load game logs");
       const logData = await lr.json();
 
-      const logs = (logData.recent_logs||[]).slice(0,20);
-      if (!logs.length) throw new Error("No logs");
+      const allLogs = (logData.recent_logs || []);
+      if (!allLogs.length) throw new Error("No logs");
 
-      // 3. Simple projection: weighted mean (50/30/20 on L5/L10/L20)
-      const calc = (n) => {
-        const w = logs.slice(0,n).map(r=>parseFloat(r.stat)||0);
-        return w.length ? w.reduce((a,b)=>a+b,0)/w.length : 0;
-      };
-      const l5=calc(5), l10=calc(10), l20=calc(20);
-      const proj = +((l5*0.5 + l10*0.3 + l20*0.2)).toFixed(1);
-      const diffPct = ((proj - prop.line) / prop.line) * 100;
+      // 3. Run the FULL model pipeline (same as Game Log tab)
+      const validLogs = allLogs.map(r => ({
+        min: parseFloat(r.min) || 0,
+        stat: parseFloat(r.stat) || 0,
+      })).filter(r => r.min > 0);
 
-      // 4. Simple score without full Monte Carlo (fast)
-      const cv = STAT_CV[prop.statType] || 0.35;
-      const edgeNorm = clamp((diffPct/100)/cv, -1, 1);
-      const overEst  = clamp(0.5 + edgeNorm*0.4, 0.05, 0.95);
-      const score    = Math.round(clamp(50 + edgeNorm*45, 0, 100));
+      if (!validLogs.length) throw new Error("No valid logs");
+
+      const model = buildGameLogModel({
+        logs: validLogs,
+        h2hLogs: [],
+        statType: prop.statType,
+        projMin: 0,   // will use mean from logs
+        useRecency: true,
+        decayStrength: 0.12,
+      });
+
+      const proj     = +(model.projection).toFixed(1);
+      const propLine = prop.line;
+      const diffPct  = propLine > 0 ? ((proj - propLine) / propLine) * 100 : 0;
+
+      // 4. Run Monte Carlo (5k iters for speed)
+      const sim = runMonteCarlo({
+        meanRate:   model.blendedRate,
+        sdRate:     model.sdRate,
+        meanMin:    model.pMin,
+        sdMin:      model.sdMin || model.pMin * 0.12,
+        projMin:    model.pMin,
+        matchupFactor: 1,
+        iters: 5000,
+      });
+
+      const ss = calcSimStats(sim.outcomes, propLine);
+
+      const score = getEdgeScore({
+        diffPct,
+        overPct:   ss.overPct,
+        boomPct:   ss?.boomPct || 0,
+        bustPct:   ss?.bustPct || 0,
+        minuteStability: model.minuteStability ?? 0.7,
+        statType:  prop.statType,
+      });
 
       setModels(m => ({...m, [key]: {
-        loading: false, score, proj, diffPct: +diffPct.toFixed(1),
-        overEst: +(overEst*100).toFixed(0), playerId: match.id,
-        l5, l10, l20,
+        loading:  false,
+        score,
+        proj,
+        diffPct:  +diffPct.toFixed(1),
+        overPct:  +ss.overPct.toFixed(1),
+        playerId: match.id,
       }}));
     } catch(e) {
       setModels(m => ({...m, [key]: {loading: false, err: e.message}}));
     }
   };
 
-  // Load models for visible props
+  // Load models for visible props — staggered to avoid hammering bbref
   useEffect(() => {
     const visible = props.filter(p => filter==="All" || p.statType===filter);
-    visible.forEach(p => loadModelForProp(p));
+    // Group by player so we only load each player once (first stat type)
+    const seen = new Set();
+    const toLoad = [];
+    visible.forEach(p => {
+      const playerKey = p.playerName;
+      if (!seen.has(playerKey)) {
+        seen.add(playerKey);
+        toLoad.push(p);
+      }
+    });
+    // Stagger requests 300ms apart to avoid rate limiting
+    toLoad.forEach((p, i) => {
+      setTimeout(() => loadModelForProp(p), i * 300);
+    });
   }, [props, filter]);
+
+  // When a player model loads, fill in all their other stat types from same log data
+  useEffect(() => {
+    // Re-run any props for players whose model just loaded
+    const visible = props.filter(p => filter==="All" || p.statType===filter);
+    const missing = visible.filter(p => {
+      const key = `${p.playerName}|${p.statType}`;
+      return !models[key];
+    });
+    if (missing.length > 0) {
+      missing.forEach((p, i) => setTimeout(() => loadModelForProp(p), i * 150));
+    }
+  }, [models]);
 
   const displayDate = gameDate.length===8
     ? `${gameDate.slice(4,6)}/${gameDate.slice(6,8)}/${gameDate.slice(0,4)}`
