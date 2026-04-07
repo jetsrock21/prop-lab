@@ -781,77 +781,77 @@ async def get_roster_id_map(team_abv: str) -> dict:
 @app.get("/edge/odds")
 async def get_odds(gameID: str = Query(...)):
     """
-    Get player props for a specific game using getNBAGamesAndStats.
-    Returns list of {playerName, statType, line, position}.
+    Get player props for a game using getNBABettingOdds with gameDate.
+    gameID format: YYYYMMDD_AWAY@HOME
     """
     if gameID in _odds_cache:
         return _odds_cache[gameID]
 
     if not RAPIDAPI_KEY:
-        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set in environment.")
+        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set.")
 
-    # Parse teams from gameID format: YYYYMMDD_AWAY@HOME
+    # Extract date and teams from gameID
     try:
-        game_part = gameID.split("_")[1]   # e.g. "ATL@ORL"
+        date_part = gameID.split("_")[0]       # YYYYMMDD
+        game_part = gameID.split("_")[1]       # AWAY@HOME
         away_team, home_team = game_part.split("@")
     except Exception:
-        away_team, home_team = "", ""
+        raise HTTPException(status_code=400, detail=f"Invalid gameID format: {gameID}")
 
-    # Fetch game data + rosters in parallel
-    url = f"{TANK01_BASE}/getNBAGamesAndStats"
-
+    # Fetch betting odds (contains playerProps when called with gameDate)
+    # and team rosters in parallel for player name lookup
     async with httpx.AsyncClient(timeout=20) as client:
-        async def safe_get(url, params):
-            try:
-                return await client.get(url, params=params, headers=tank01_headers())
-            except Exception as e:
-                return e
-
-        game_r, away_r, home_r = await asyncio.gather(
-            safe_get(url, {"gameID": gameID}),
-            safe_get(f"{TANK01_BASE}/getNBATeamRoster", {"teamAbv": away_team}) if away_team else asyncio.sleep(0),
-            safe_get(f"{TANK01_BASE}/getNBATeamRoster", {"teamAbv": home_team}) if home_team else asyncio.sleep(0),
+        odds_r, away_r, home_r = await asyncio.gather(
+            client.get(f"{TANK01_BASE}/getNBABettingOdds",
+                      params={"gameDate": date_part}, headers=tank01_headers()),
+            client.get(f"{TANK01_BASE}/getNBATeamRoster",
+                      params={"teamAbv": away_team}, headers=tank01_headers()),
+            client.get(f"{TANK01_BASE}/getNBATeamRoster",
+                      params={"teamAbv": home_team}, headers=tank01_headers()),
+            return_exceptions=True
         )
 
-    # Build playerID → {name, position} map
+    # Build playerID → {name, position} map from rosters
     id_map = {}
-    pos_map = {"PG":"PG","SG":"SG","SF":"SF","PF":"PF","C":"C",
-               "G":"PG","F":"SF","G-F":"SG","F-G":"SF","F-C":"PF","C-F":"C"}
-
+    pos_norm = {"PG":"PG","SG":"SG","SF":"SF","PF":"PF","C":"C",
+                "G":"PG","F":"SF","G-F":"SG","F-G":"SF","F-C":"PF","C-F":"C"}
     for roster_r in [away_r, home_r]:
-        if isinstance(roster_r, Exception) or roster_r is None:
-            continue
+        if isinstance(roster_r, Exception): continue
         try:
-            rd = roster_r.json()
-            roster = rd.get("body", {}).get("roster", [])
-            if isinstance(roster, list):
-                for p in roster:
-                    pid  = str(p.get("playerID",""))
-                    name = p.get("longName") or p.get("name") or ""
-                    pos  = pos_map.get(p.get("pos",""), "SF")
-                    if pid and name:
-                        id_map[pid] = {"name": name, "position": pos}
+            roster = roster_r.json().get("body", {}).get("roster", [])
+            for p in (roster if isinstance(roster, list) else []):
+                pid  = str(p.get("playerID",""))
+                name = p.get("longName") or p.get("name") or ""
+                pos  = pos_norm.get(p.get("pos",""), "SF")
+                if pid and name:
+                    id_map[pid] = {"name": name, "position": pos}
         except Exception:
             pass
 
-    # Parse player props from game response
+    # Parse props — find the matching game in the response
     props = []
     try:
-        body = game_r.json().get("body", {})
-        # body is a list of game objects
-        games = body if isinstance(body, list) else [body]
-        for game in games:
-            player_props = game.get("playerProps", [])
-            for player_entry in player_props:
+        body = odds_r.json().get("body", [])
+        games = body if isinstance(body, list) else list(body.values())
+        # Find the game matching our gameID
+        target = next((g for g in games
+                       if isinstance(g, dict) and g.get("gameID") == gameID), None)
+        if not target:
+            # Try matching by away/home teams
+            target = next((g for g in games
+                           if isinstance(g, dict) and
+                           g.get("awayTeam","").upper() == away_team.upper() and
+                           g.get("homeTeam","").upper() == home_team.upper()), None)
+
+        if target:
+            for player_entry in target.get("playerProps", []):
                 pid       = str(player_entry.get("playerID",""))
                 prop_bets = player_entry.get("propBets", {})
-                player_info = id_map.get(pid, {})
-                player_name = player_info.get("name","")
-                position    = player_info.get("position","SF")
-
-                if not player_name:
-                    continue  # skip unknown players
-
+                info      = id_map.get(pid, {})
+                name      = info.get("name","")
+                position  = info.get("position","SF")
+                if not name:
+                    continue
                 for stat_key, line_val in prop_bets.items():
                     stat_type = TANK01_STAT_MAP.get(stat_key)
                     if not stat_type:
@@ -861,7 +861,7 @@ async def get_odds(gameID: str = Query(...)):
                     except Exception:
                         continue
                     props.append({
-                        "playerName": player_name,
+                        "playerName": name,
                         "statType":   stat_type,
                         "line":       line,
                         "position":   position,
@@ -869,28 +869,37 @@ async def get_odds(gameID: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to parse props: {e}")
 
-    # Sort: by player name then stat type priority
     stat_order = ["Points","Rebounds","Assists","3-Pointers","PRA","PR","PA","RA","Blocks","Steals"]
-    props.sort(key=lambda x: (x["playerName"], stat_order.index(x["statType"])
-                               if x["statType"] in stat_order else 99))
+    props.sort(key=lambda x: (x["playerName"],
+               stat_order.index(x["statType"]) if x["statType"] in stat_order else 99))
 
     _odds_cache[gameID] = props
     return props
 
-
 @app.get("/edge/odds/raw")
-async def get_odds_raw(gameID: str = Query(...)):
-    """Debug: return completely raw Tank01 response."""
+async def get_odds_raw(gameDate: str = Query(...)):
+    """Debug: getNBABettingOdds with gameDate to see if props are included."""
     if not RAPIDAPI_KEY:
         return {"error": "RAPIDAPI_KEY not set"}
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.get(
-                f"{TANK01_BASE}/getNBAGamesAndStats",
-                params={"gameID": gameID},
+                f"{TANK01_BASE}/getNBABettingOdds",
+                params={"gameDate": gameDate},
                 headers=tank01_headers()
             )
-        return {"status": r.status_code, "raw": r.json()}
+        data = r.json()
+        # Show structure of first game
+        body = data.get("body", {})
+        first_key = next(iter(body), None) if isinstance(body, dict) else None
+        first_game = body.get(first_key, {}) if first_key else {}
+        return {
+            "status": r.status_code,
+            "body_type": type(body).__name__,
+            "first_game_keys": list(first_game.keys()) if isinstance(first_game, dict) else [],
+            "has_playerProps": "playerProps" in first_game,
+            "first_game_preview": {k: str(v)[:100] for k,v in first_game.items()} if isinstance(first_game, dict) else str(first_game)[:300],
+        }
     except Exception as e:
         return {"error": str(e)}
 
