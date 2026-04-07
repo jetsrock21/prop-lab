@@ -897,19 +897,35 @@ async def get_odds_raw(gameID: str = Query(...)):
 
 @app.get("/edge/odds/raw2")
 async def get_odds_raw2(gameDate: str = Query(...)):
-    """Debug: getNBAGamesAndStats with gameDate."""
+    """Debug: try multiple endpoint name variations."""
     if not RAPIDAPI_KEY:
         return {"error": "RAPIDAPI_KEY not set"}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(
-                f"{TANK01_BASE}/getNBAGamesAndStats",
-                params={"gameDate": gameDate},
-                headers=tank01_headers()
-            )
-        return {"status": r.status_code, "raw": r.json()}
-    except Exception as e:
-        return {"error": str(e)}
+    
+    endpoints = [
+        "getNBAGamesAndStatsForDate",
+        "getNBAGamesForDate", 
+        "getNBAScoresAndOdds",
+        "getNBAGameOdds",
+        "getNBAPlayerProps",
+        "getNBAProps",
+        "getNBADailyOdds",
+        "getNBAGamesAndOdds",
+    ]
+    
+    results = {}
+    async with httpx.AsyncClient(timeout=10) as client:
+        for ep in endpoints:
+            try:
+                r = await client.get(
+                    f"{TANK01_BASE}/{ep}",
+                    params={"gameDate": gameDate},
+                    headers=tank01_headers()
+                )
+                results[ep] = {"status": r.status_code, "preview": str(r.text[:200])}
+            except Exception as e:
+                results[ep] = {"error": str(e)}
+    
+    return results
 
 
 @app.get("/edge/positions")
