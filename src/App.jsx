@@ -2203,6 +2203,7 @@ export default function App(){
   const [form,setForm]=useState(EMPTY_FORM);
   const [logForm,setLogForm]=useState(EMPTY_LOG);
   const [done,setDone]=useState(false);
+  const pendingAnalyzeRef = useRef(false); // set true by Edge Finder to trigger analyze after state settles
   const [history,setHistory]=useState([]);
   const [logSubTab,setLogSubTab]=useState("paste"); // paste | manual
   const [pasteParsedLogs,setPasteParsedLogs]=useState([]); // from paste parser
@@ -2435,6 +2436,15 @@ export default function App(){
     : (logSubTab==="paste"
         ? pasteParsedLogs.length>0
         : logForm.logs.some(r=>parseFloat(r.min)>0&&parseFloat(r.stat)>=0&&r.stat!==""));
+
+  // Fire analyze when Edge Finder has loaded everything and flagged pendingAnalyzeRef
+  useEffect(()=>{
+    if (pendingAnalyzeRef.current && pasteParsedLogs.length > 0 && !done) {
+      pendingAnalyzeRef.current = false;
+      // Small delay so React finishes rendering the new logs
+      setTimeout(()=>{ handleAnalyze(); }, 100);
+    }
+  }, [pasteParsedLogs]);
 
   const handleAnalyze=()=>{
     let m;
@@ -3440,9 +3450,15 @@ export default function App(){
                 try { opp = game.gameID.split("_")[1].split("@")[1]; } catch {}
               }
 
-              // 1. Switch to lab + game log mode + scroll
+              // 1. Switch to lab + game log mode + scroll, clear stale results
               setMainTab("lab");
               setInputMode("gamelog");
+              setDone(false);
+              setSim(null);
+              setModel(null);
+              setPasteParsedLogs([]);
+              setPasteParsedH2H([]);
+              pendingAnalyzeRef.current = false;
               window.scrollTo({top:0,behavior:"smooth"});
 
               // 2. Set form fields
@@ -3503,8 +3519,8 @@ export default function App(){
                   if(l20) { upd.l20Avg=String(l20.avg);  upd.l20Mpg=String(l20.mpg);  upd.l20Med=String(l20.median); }
                   setLogForm(f=>({...f, ...upd}));
 
-                  // 9. Auto-analyze after state settles
-                  setTimeout(() => handleAnalyze(), 600);
+                  // 9. Flag for auto-analyze — fires via useEffect once logs are in state
+                  pendingAnalyzeRef.current = true;
                 }
               }
             }}/>
