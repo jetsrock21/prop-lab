@@ -732,11 +732,57 @@ async def get_schedule(gameDate: str = Query(...)):
     return games
 
 
+# Stat key mapping for Tank01 propBets keys
+TANK01_STAT_MAP = {
+    "pts":        "Points",
+    "reb":        "Rebounds",
+    "ast":        "Assists",
+    "threes":     "3-Pointers",
+    "blk":        "Blocks",
+    "stl":        "Steals",
+    "ptsrebast":  "PRA",
+    "ptsreb":     "PR",
+    "ptsast":     "PA",
+    "rebast":     "RA",
+}
+
+# Stats we care about (skip turnovers, stlblk combos etc)
+WANTED_STATS = set(TANK01_STAT_MAP.keys())
+
+
+async def get_roster_id_map(team_abv: str) -> dict:
+    """Returns {tank01_playerID: {name, position}} for a team."""
+    if team_abv in _roster_cache:
+        return _roster_cache[team_abv]
+
+    url = f"{TANK01_BASE}/getNBATeamRoster"
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(url, params={"teamAbv": team_abv}, headers=tank01_headers())
+        if not r.ok:
+            return {}
+        data = r.json()
+
+    pos_map = {"PG":"PG","SG":"SG","SF":"SF","PF":"PF","C":"C",
+               "G":"PG","F":"SF","G-F":"SG","F-G":"SF","F-C":"PF","C-F":"C"}
+    result = {}
+    roster = data.get("body", {}).get("roster", [])
+    if isinstance(roster, list):
+        for p in roster:
+            pid  = str(p.get("playerID",""))
+            name = p.get("longName") or p.get("name") or ""
+            pos  = pos_map.get(p.get("pos",""), "SF")
+            if pid and name:
+                result[pid] = {"name": name, "position": pos}
+
+    _roster_cache[team_abv] = result
+    return result
+
+
 @app.get("/edge/odds")
 async def get_odds(gameID: str = Query(...)):
     """
-    Get player props for a specific game.
-    Returns list of {playerName, statType, line, overOdds, underOdds}.
+    Get player props for a specific game using getNBAGamesAndStats.
+    Returns list of {playerName, statType, line, position}.
     """
     if gameID in _odds_cache:
         return _odds_cache[gameID]
@@ -744,88 +790,89 @@ async def get_odds(gameID: str = Query(...)):
     if not RAPIDAPI_KEY:
         raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set in environment.")
 
-    url = f"{TANK01_BASE}/getNBABettingOdds"
+    # Parse teams from gameID format: YYYYMMDD_AWAY@HOME
+    try:
+        game_part = gameID.split("_")[1]   # e.g. "ATL@ORL"
+        away_team, home_team = game_part.split("@")
+    except Exception:
+        away_team, home_team = "", ""
+
+    # Fetch game data + rosters in parallel
+    url = f"{TANK01_BASE}/getNBAGamesAndStats"
+
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(url, params={"gameID": gameID}, headers=tank01_headers())
-        r.raise_for_status()
-        data = r.json()
-
-    # Parse player props from response
-    props = []
-    body = data.get("body", {})
-
-    # Tank01 returns odds nested under gameID key
-    game_odds = body.get(gameID, body) if isinstance(body, dict) else {}
-
-    # Player props are under "playerPropBets" or similar
-    player_props = (
-        game_odds.get("playerPropBets") or
-        game_odds.get("propBets") or
-        game_odds.get("playerProps") or
-        []
-    )
-
-    # Map Tank01 stat names → our stat type names
-    STAT_MAP = {
-        "pts":        "Points",
-        "points":     "Points",
-        "reb":        "Rebounds",
-        "rebounds":   "Rebounds",
-        "ast":        "Assists",
-        "assists":    "Assists",
-        "3pm":        "3-Pointers",
-        "threes":     "3-Pointers",
-        "blk":        "Blocks",
-        "blocks":     "Blocks",
-        "stl":        "Steals",
-        "steals":     "Steals",
-        "pts+reb+ast": "PRA",
-        "pra":        "PRA",
-        "pts+reb":    "PR",
-        "pts+ast":    "PA",
-        "reb+ast":    "RA",
-    }
-
-    if isinstance(player_props, list):
-        for prop in player_props:
-            raw_stat = (prop.get("propType") or prop.get("stat") or "").lower().strip()
-            stat_type = STAT_MAP.get(raw_stat)
-            if not stat_type:
-                continue
-            player_name = prop.get("playerName") or prop.get("name") or ""
-            line = prop.get("propLine") or prop.get("line") or prop.get("value")
+        async def safe_get(url, params):
             try:
-                line = float(line)
-            except Exception:
-                continue
-            props.append({
-                "playerName": player_name,
-                "statType":   stat_type,
-                "line":       line,
-                "overOdds":   prop.get("overOdds") or prop.get("over") or -110,
-                "underOdds":  prop.get("underOdds") or prop.get("under") or -110,
-            })
-    elif isinstance(player_props, dict):
-        # Sometimes keyed by player name
-        for pname, pdata in player_props.items():
-            if not isinstance(pdata, dict):
-                continue
-            for raw_stat, details in pdata.items():
-                stat_type = STAT_MAP.get(raw_stat.lower().strip())
-                if not stat_type or not isinstance(details, dict):
-                    continue
-                line = details.get("propLine") or details.get("line")
-                try:
-                    line = float(line)
-                except Exception:
-                    continue
-                props.append({
-                    "playerName": pname,
-                    "statType":   stat_type,
-                    "line":       line,
-                    "overOdds":   details.get("overOdds") or -110,
-                    "underOdds":  details.get("underOdds") or -110,
-                })
+                return await client.get(url, params=params, headers=tank01_headers())
+            except Exception as e:
+                return e
+
+        game_r, away_r, home_r = await asyncio.gather(
+            safe_get(url, {"gameID": gameID}),
+            safe_get(f"{TANK01_BASE}/getNBATeamRoster", {"teamAbv": away_team}) if away_team else asyncio.sleep(0),
+            safe_get(f"{TANK01_BASE}/getNBATeamRoster", {"teamAbv": home_team}) if home_team else asyncio.sleep(0),
+        )
+
+    # Build playerID → {name, position} map
+    id_map = {}
+    pos_map = {"PG":"PG","SG":"SG","SF":"SF","PF":"PF","C":"C",
+               "G":"PG","F":"SF","G-F":"SG","F-G":"SF","F-C":"PF","C-F":"C"}
+
+    for roster_r in [away_r, home_r]:
+        if isinstance(roster_r, Exception) or roster_r is None:
+            continue
+        try:
+            rd = roster_r.json()
+            roster = rd.get("body", {}).get("roster", [])
+            if isinstance(roster, list):
+                for p in roster:
+                    pid  = str(p.get("playerID",""))
+                    name = p.get("longName") or p.get("name") or ""
+                    pos  = pos_map.get(p.get("pos",""), "SF")
+                    if pid and name:
+                        id_map[pid] = {"name": name, "position": pos}
+        except Exception:
+            pass
+
+    # Parse player props from game response
+    props = []
+    try:
+        body = game_r.json().get("body", {})
+        # body is a list of game objects
+        games = body if isinstance(body, list) else [body]
+        for game in games:
+            player_props = game.get("playerProps", [])
+            for player_entry in player_props:
+                pid       = str(player_entry.get("playerID",""))
+                prop_bets = player_entry.get("propBets", {})
+                player_info = id_map.get(pid, {})
+                player_name = player_info.get("name","")
+                position    = player_info.get("position","SF")
+
+                if not player_name:
+                    continue  # skip unknown players
+
+                for stat_key, line_val in prop_bets.items():
+                    stat_type = TANK01_STAT_MAP.get(stat_key)
+                    if not stat_type:
+                        continue
+                    try:
+                        line = float(line_val)
+                    except Exception:
+                        continue
+                    props.append({
+                        "playerName": player_name,
+                        "statType":   stat_type,
+                        "line":       line,
+                        "position":   position,
+                    })
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to parse props: {e}")
+
+    # Sort: by player name then stat type priority
+    stat_order = ["Points","Rebounds","Assists","3-Pointers","PRA","PR","PA","RA","Blocks","Steals"]
+    props.sort(key=lambda x: (x["playerName"], stat_order.index(x["statType"])
+                               if x["statType"] in stat_order else 99))
 
     _odds_cache[gameID] = props
     return props
