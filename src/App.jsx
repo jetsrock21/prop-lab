@@ -3434,51 +3434,79 @@ export default function App(){
           {/* ══ EDGE FINDER ══ */}
           {mainTab==="edge"&&(
             <EdgeFinder apiBase={API_BASE} onAnalyze={async (player, statType, line, position, game) => {
-              // 1. Switch to lab + game log mode
-              setMainTab("lab");
-              setInputMode("gamelog");
-              window.scrollTo({top:0,behavior:"smooth"});
-
-              // 2. Set stat type, prop line, player name
-              setLogForm(f=>({...f,
-                statType,
-                propLine: String(line),
-                playerName: player,
-              }));
-
-              // 3. Set DvP position
-              dvp.setPosition(position||"PG");
-
-              // 4. Set opponent from game
+              // Derive opponent from gameID
               let opp = "";
               if (game?.gameID) {
                 try { opp = game.gameID.split("_")[1].split("@")[1]; } catch {}
               }
+
+              // 1. Switch to lab + game log mode + scroll
+              setMainTab("lab");
+              setInputMode("gamelog");
+              window.scrollTo({top:0,behavior:"smooth"});
+
+              // 2. Set form fields
+              setLogForm(f=>({...f, statType, propLine:String(line), playerName:player}));
+
+              // 3. Set DvP position + opponent
+              dvp.setPosition(position||"PG");
               setDvpOpp(opp);
 
-              // 5. Search for player and trigger load
+              // 4. Find player ID
+              let matchId = null, matchName = player;
               try {
                 const sr = await fetch(`${API_BASE}/players/search?q=${encodeURIComponent(player.split(" ").slice(-1)[0])}`);
-                const players = sr.ok ? await sr.json() : [];
-                const match = players.find(p=>p.full_name.toLowerCase()===player.toLowerCase())
-                           || players.find(p=>p.full_name.toLowerCase().includes(player.toLowerCase()));
-                if (match) {
-                  nba.setPlayerId(match.id);
-                  nba.setPlayerName(match.full_name);
-                  nba.setLoaded(false);
-                  nba.setError("");
-                  // 6. Load game logs
-                  const data = await nba.loadData(match.id, match.full_name, statType);
-                  if (data) {
-                    // 7. Set H2H opponent filter if we have it
-                    if (opp) nba.setOpponent(opp);
-                    // 8. Auto-analyze after short delay for state to settle
-                    setTimeout(() => {
-                      document.querySelector && document.querySelector('[data-analyze]')?.click();
-                    }, 500);
-                  }
+                const list = sr.ok ? await sr.json() : [];
+                const m = list.find(p=>p.full_name.toLowerCase()===player.toLowerCase())
+                       || list.find(p=>p.full_name.toLowerCase().includes(player.toLowerCase()));
+                if (m) { matchId = m.id; matchName = m.full_name; }
+              } catch {}
+
+              // 5. Set NBA player state (fills the search box + enables Load)
+              if (matchId) {
+                nba.setPlayerId(matchId);
+                nba.setPlayerName(matchName);
+                nba.setOpponent(opp);
+                nba.setLoaded(false);
+                nba.setError("");
+
+                // 6. Load game logs
+                const data = await nba.loadData(matchId, matchName, statType);
+
+                if (data) {
+                  // 7. Apply game limit + min filter (reuse handleNBALoad logic)
+                  const limit = parseInt(gameLimit) || 0;
+                  const minMin = parseFloat(minFilter) || 0;
+                  const allLogs = data.recent_logs || [];
+                  const filtered = minMin > 0 ? allLogs.filter(r=>parseFloat(r.min)>=minMin) : allLogs;
+                  const sliced  = limit > 0 ? filtered.slice(0, limit) : filtered;
+                  setPasteParsedLogs(sliced);
+                  if (opp && data.h2h_logs) setPasteParsedH2H(data.h2h_logs);
+                  setLogSubTab("paste");
+
+                  // 8. Fill L5/L10/L20
+                  const calcW = (logs, n) => {
+                    const w = logs.slice(0,n);
+                    if (!w.length) return null;
+                    const stats = w.map(r=>parseFloat(r.stat)||0);
+                    const mins  = w.map(r=>parseFloat(r.min)||0);
+                    return {
+                      avg: +(stats.reduce((a,b)=>a+b,0)/stats.length).toFixed(1),
+                      mpg: +(mins.reduce((a,b)=>a+b,0)/mins.length).toFixed(1),
+                      median: +([...stats].sort((a,b)=>a-b)[Math.floor(stats.length/2)]).toFixed(1),
+                    };
+                  };
+                  const l5=calcW(sliced,5)||data.l5, l10=calcW(sliced,10)||data.l10, l20=calcW(sliced,20)||data.l20;
+                  const upd = {playerName: matchName};
+                  if(l5)  { upd.l5Avg=String(l5.avg);   upd.l5Mpg=String(l5.mpg);   upd.l5Med=String(l5.median); }
+                  if(l10) { upd.l10Avg=String(l10.avg);  upd.l10Mpg=String(l10.mpg);  upd.l10Med=String(l10.median); }
+                  if(l20) { upd.l20Avg=String(l20.avg);  upd.l20Mpg=String(l20.mpg);  upd.l20Med=String(l20.median); }
+                  setLogForm(f=>({...f, ...upd}));
+
+                  // 9. Auto-analyze after state settles
+                  setTimeout(() => handleAnalyze(), 600);
                 }
-              } catch(e) { console.error("Edge auto-load:", e); }
+              }
             }}/>
           )}
 
