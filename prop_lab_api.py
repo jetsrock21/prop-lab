@@ -877,31 +877,43 @@ async def get_odds(gameID: str = Query(...)):
     return props
 
 @app.get("/edge/odds/raw")
-async def get_odds_raw(gameDate: str = Query(...)):
-    """Debug: getNBABettingOdds with gameDate to see if props are included."""
+async def get_odds_raw(gameID: str = Query(...)):
+    """Debug: show exactly what odds + roster returns for a game."""
     if not RAPIDAPI_KEY:
         return {"error": "RAPIDAPI_KEY not set"}
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(
-                f"{TANK01_BASE}/getNBABettingOdds",
-                params={"gameDate": gameDate},
-                headers=tank01_headers()
-            )
-        data = r.json()
-        # Show structure of first game
-        body = data.get("body", {})
-        first_key = next(iter(body), None) if isinstance(body, dict) else None
-        first_game = body.get(first_key, {}) if first_key else {}
-        return {
-            "status": r.status_code,
-            "body_type": type(body).__name__,
-            "first_game_keys": list(first_game.keys()) if isinstance(first_game, dict) else [],
-            "has_playerProps": "playerProps" in first_game,
-            "first_game_preview": {k: str(v)[:100] for k,v in first_game.items()} if isinstance(first_game, dict) else str(first_game)[:300],
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        date_part = gameID.split("_")[0]
+        game_part = gameID.split("_")[1]
+        away_team, home_team = game_part.split("@")
+    except Exception:
+        return {"error": f"bad gameID: {gameID}"}
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        odds_r   = await client.get(f"{TANK01_BASE}/getNBABettingOdds",
+                     params={"gameDate": date_part}, headers=tank01_headers())
+        roster_r = await client.get(f"{TANK01_BASE}/getNBATeamRoster",
+                     params={"teamAbv": away_team}, headers=tank01_headers())
+
+    odds_body  = odds_r.json().get("body", [])
+    games      = odds_body if isinstance(odds_body, list) else list(odds_body.values())
+    target     = next((g for g in games if isinstance(g,dict) and g.get("gameID")==gameID), None)
+
+    roster_body = roster_r.json().get("body", {})
+    roster      = roster_body.get("roster", []) if isinstance(roster_body, dict) else []
+    sample_player = roster[0] if roster else {}
+
+    return {
+        "odds_status":        odds_r.status_code,
+        "games_count":        len(games),
+        "game_found":         target is not None,
+        "game_keys":          list(target.keys()) if target else [],
+        "playerProps_count":  len(target.get("playerProps",[])) if target else 0,
+        "first_prop":         target.get("playerProps",[{}])[0] if target else {},
+        "roster_status":      roster_r.status_code,
+        "roster_count":       len(roster),
+        "sample_player_keys": list(sample_player.keys()) if sample_player else [],
+        "sample_player":      sample_player,
+    }
 
 
 @app.get("/edge/odds/raw2")
