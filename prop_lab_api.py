@@ -896,6 +896,7 @@ async def get_odds(gameID: str = Query(...)):
                     position = fallback.get("position","SF")
                 if not name:
                     continue
+                for stat_key, line_val in prop_bets.items():
                     stat_type = TANK01_STAT_MAP.get(stat_key)
                     if not stat_type:
                         continue
@@ -1052,6 +1053,16 @@ async def get_odds_raw2(gameID: str = Query(...)):
         "player_info_test": player_info_test,
         "props_raw_sample": props_raw[:2],
     }
+
+@app.get("/edge/cache/clear")
+async def clear_edge_cache():
+    """Clear all edge finder caches."""
+    _schedule_cache.clear()
+    _odds_cache.clear()
+    _roster_cache.clear()
+    _tank01_id_cache.clear()
+    return {"cleared": True}
+
 
 @app.get("/edge/positions")
 async def get_positions(teamAbv: str = Query(...)):
