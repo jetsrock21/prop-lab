@@ -955,9 +955,12 @@ async def get_odds_raw(gameID: str = Query(...)):
                                     headers=tank01_headers())
             player_info_result = {"status": pi_r.status_code, "body_preview": str(pi_r.text[:300])}
 
+    actual_game_ids = [g.get("gameID","") for g in games if isinstance(g,dict)]
     return {
         "odds_status":        odds_r.status_code,
         "games_count":        len(games),
+        "gameID_searched":    gameID,
+        "actual_gameIDs":     actual_game_ids,
         "game_found":         target is not None,
         "playerProps_count":  len(target.get("playerProps",[])) if target else 0,
         "first_prop":         target.get("playerProps",[{}])[0] if target else {},
