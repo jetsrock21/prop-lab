@@ -941,17 +941,32 @@ async def get_odds_raw(gameID: str = Query(...)):
     roster      = roster_body.get("roster", []) if isinstance(roster_body, dict) else []
     sample_player = roster[0] if roster else {}
 
+    # Check if prop playerIDs match roster playerIDs
+    prop_pid = str(target.get("playerProps",[{}])[0].get("playerID","")) if target else ""
+    roster_pids = [str(p.get("playerID","")) for p in roster]
+    id_match = prop_pid in roster_pids
+
+    # Try getNBAPlayerInfo for the first prop player
+    player_info_result = {}
+    if prop_pid and not id_match:
+        async with httpx.AsyncClient(timeout=10) as client:
+            pi_r = await client.get(f"{TANK01_BASE}/getNBAPlayerInfo",
+                                    params={"playerID": prop_pid},
+                                    headers=tank01_headers())
+            player_info_result = {"status": pi_r.status_code, "body_preview": str(pi_r.text[:300])}
+
     return {
         "odds_status":        odds_r.status_code,
         "games_count":        len(games),
         "game_found":         target is not None,
-        "game_keys":          list(target.keys()) if target else [],
         "playerProps_count":  len(target.get("playerProps",[])) if target else 0,
         "first_prop":         target.get("playerProps",[{}])[0] if target else {},
         "roster_status":      roster_r.status_code,
         "roster_count":       len(roster),
-        "sample_player_keys": list(sample_player.keys()) if sample_player else [],
-        "sample_player":      sample_player,
+        "first_prop_playerID": prop_pid,
+        "prop_id_in_roster":  id_match,
+        "roster_sample_ids":  roster_pids[:5],
+        "player_info_lookup": player_info_result,
     }
 
 
