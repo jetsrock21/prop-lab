@@ -850,7 +850,7 @@ async def get_odds(gameID: str = Query(...)):
     id_map = {}
     pos_norm = {"PG":"PG","SG":"SG","SF":"SF","PF":"PF","C":"C",
                 "G":"PG","F":"SF","G-F":"SG","F-G":"SF","F-C":"PF","C-F":"C"}
-    for roster_r in [away_r, home_r]:
+    for roster_r, ta in [(away_r, away_team.upper()), (home_r, home_team.upper())]:
         if isinstance(roster_r, Exception): continue
         try:
             roster = roster_r.json().get("body", {}).get("roster", [])
@@ -859,10 +859,9 @@ async def get_odds(gameID: str = Query(...)):
                 name = p.get("longName") or p.get("name") or ""
                 pos  = pos_norm.get(p.get("pos",""), "SF")
                 if pid and name:
-                    id_map[pid] = {"name": name, "position": pos}
-                    # Also cache under any alternate ID formats
+                    id_map[pid] = {"name": name, "position": pos, "team": ta}
                     with _tank01_id_lock:
-                        _tank01_id_cache[pid] = {"name": name, "position": pos}
+                        _tank01_id_cache[pid] = {"name": name, "position": pos, "team": ta}
         except Exception:
             pass
 
@@ -909,6 +908,7 @@ async def get_odds(gameID: str = Query(...)):
                         "statType":   stat_type,
                         "line":       line,
                         "position":   position,
+                        "team":       info.get("team", ""),
                     })
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to parse props: {e}")
