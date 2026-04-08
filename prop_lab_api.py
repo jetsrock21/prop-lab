@@ -979,37 +979,79 @@ async def get_odds_raw(gameID: str = Query(...)):
 
 
 @app.get("/edge/odds/raw2")
-async def get_odds_raw2(gameDate: str = Query(...)):
-    """Debug: try multiple endpoint name variations."""
+async def get_odds_raw2(gameID: str = Query(...)):
+    """Debug: trace full prop parsing step by step."""
     if not RAPIDAPI_KEY:
-        return {"error": "RAPIDAPI_KEY not set"}
-    
-    endpoints = [
-        "getNBAGamesAndStatsForDate",
-        "getNBAGamesForDate", 
-        "getNBAScoresAndOdds",
-        "getNBAGameOdds",
-        "getNBAPlayerProps",
-        "getNBAProps",
-        "getNBADailyOdds",
-        "getNBAGamesAndOdds",
-    ]
-    
-    results = {}
-    async with httpx.AsyncClient(timeout=10) as client:
-        for ep in endpoints:
-            try:
-                r = await client.get(
-                    f"{TANK01_BASE}/{ep}",
-                    params={"gameDate": gameDate},
-                    headers=tank01_headers()
-                )
-                results[ep] = {"status": r.status_code, "preview": str(r.text[:200])}
-            except Exception as e:
-                results[ep] = {"error": str(e)}
-    
-    return results
+        return {"error": "no key"}
+    try:
+        date_part = gameID.split("_")[0]
+        game_part = gameID.split("_")[1]
+        away_team, home_team = game_part.split("@")
+    except Exception as e:
+        return {"error": f"bad gameID: {e}"}
 
+    async with httpx.AsyncClient(timeout=20) as client:
+        odds_r, away_r, home_r = await asyncio.gather(
+            client.get(f"{TANK01_BASE}/getNBABettingOdds",
+                      params={"gameDate": date_part, "playerProps": "true", "itemFormat": "list"},
+                      headers=tank01_headers()),
+            client.get(f"{TANK01_BASE}/getNBATeamRoster",
+                      params={"teamAbv": away_team}, headers=tank01_headers()),
+            client.get(f"{TANK01_BASE}/getNBATeamRoster",
+                      params={"teamAbv": home_team}, headers=tank01_headers()),
+            return_exceptions=True
+        )
+
+    # Build id_map
+    id_map = {}
+    pos_norm = {"PG":"PG","SG":"SG","SF":"SF","PF":"PF","C":"C",
+                "G":"PG","F":"SF","G-F":"SG","F-G":"SF","F-C":"PF","C-F":"C"}
+    for roster_r in [away_r, home_r]:
+        if isinstance(roster_r, Exception): continue
+        try:
+            roster = roster_r.json().get("body", {}).get("roster", [])
+            for p in (roster if isinstance(roster, list) else []):
+                pid = str(p.get("playerID",""))
+                name = p.get("longName") or ""
+                pos = pos_norm.get(p.get("pos",""), "SF")
+                if pid and name:
+                    id_map[pid] = {"name": name, "position": pos}
+        except: pass
+
+    # Find game
+    body = odds_r.json().get("body", [])
+    games = body if isinstance(body, list) else list(body.values())
+    teams = {away_team.upper(), home_team.upper()}
+    target = next((g for g in games if isinstance(g,dict) and
+                   {g.get("awayTeam","").upper(), g.get("homeTeam","").upper()} == teams), None)
+
+    if not target:
+        return {"error": "game not found", "available": [g.get("gameID") for g in games if isinstance(g,dict)]}
+
+    props_raw = target.get("playerProps", [])
+    
+    # Try playerInfo for first unknown player
+    first_unknown_pid = next((str(p.get("playerID","")) for p in props_raw
+                              if str(p.get("playerID","")) not in id_map), None)
+    player_info_test = {}
+    if first_unknown_pid:
+        async with httpx.AsyncClient(timeout=10) as client:
+            pi = await client.get(f"{TANK01_BASE}/getNBAPlayerInfo",
+                                  params={"playerID": first_unknown_pid},
+                                  headers=tank01_headers())
+            player_info_test = {"status": pi.status_code, "body": pi.json().get("body",{})}
+
+    return {
+        "game_found": True,
+        "props_count": len(props_raw),
+        "id_map_size": len(id_map),
+        "id_map_sample": list(id_map.items())[:3],
+        "first_prop_pid": str(props_raw[0].get("playerID","")) if props_raw else "",
+        "first_prop_in_map": str(props_raw[0].get("playerID","")) in id_map if props_raw else False,
+        "first_unknown_pid": first_unknown_pid,
+        "player_info_test": player_info_test,
+        "props_raw_sample": props_raw[:2],
+    }
 
 @app.get("/edge/positions")
 async def get_positions(teamAbv: str = Query(...)):
