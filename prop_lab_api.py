@@ -730,7 +730,7 @@ _roster_cache   = {}   # teamAbv → {playerName: position}
 @app.get("/edge/schedule")
 async def get_schedule(gameDate: str = Query(...)):
     """
-    Get NBA games for a date (YYYYMMDD).
+    Get NBA games for a date using getNBABettingOdds so gameIDs match the odds endpoint.
     Returns list of {gameID, away, home, gameTime}.
     """
     if gameDate in _schedule_cache:
@@ -739,22 +739,24 @@ async def get_schedule(gameDate: str = Query(...)):
     if not RAPIDAPI_KEY:
         raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set in environment.")
 
-    url = f"{TANK01_BASE}/getNBAScoresOnly"
+    # Use getBettingOdds with itemFormat=list to get correct gameIDs
     async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, params={"gameDate": gameDate, "topPerformers": "false"},
+        r = await client.get(f"{TANK01_BASE}/getNBABettingOdds",
+                             params={"gameDate": gameDate, "itemFormat": "list"},
                              headers=tank01_headers())
         r.raise_for_status()
         data = r.json()
 
     games = []
-    body = data.get("body", {})
-    # body is a dict keyed by gameID
-    for gid, g in (body.items() if isinstance(body, dict) else []):
+    body = data.get("body", [])
+    game_list = body if isinstance(body, list) else list(body.values())
+    for g in game_list:
+        if not isinstance(g, dict): continue
         games.append({
-            "gameID":   gid,
-            "away":     g.get("away", ""),
-            "home":     g.get("home", ""),
-            "gameTime": g.get("gameTime", ""),
+            "gameID":     g.get("gameID", ""),
+            "away":       g.get("awayTeam", ""),
+            "home":       g.get("homeTeam", ""),
+            "gameTime":   g.get("gameTime", ""),
             "gameStatus": g.get("gameStatus", ""),
         })
 
@@ -867,15 +869,16 @@ async def get_odds(gameID: str = Query(...)):
     try:
         body = odds_r.json().get("body", [])
         games = body if isinstance(body, list) else list(body.values())
-        # Find the game matching our gameID
+        # Match by team abbreviations (away/home order can differ between endpoints)
         target = next((g for g in games
                        if isinstance(g, dict) and g.get("gameID") == gameID), None)
         if not target:
-            # Try matching by away/home teams
+            teams = {away_team.upper(), home_team.upper()}
             target = next((g for g in games
-                           if isinstance(g, dict) and
-                           g.get("awayTeam","").upper() == away_team.upper() and
-                           g.get("homeTeam","").upper() == home_team.upper()), None)
+                           if isinstance(g, dict) and {
+                               g.get("awayTeam","").upper(),
+                               g.get("homeTeam","").upper()
+                           } == teams), None)
 
         if target:
             for player_entry in target.get("playerProps", []):
