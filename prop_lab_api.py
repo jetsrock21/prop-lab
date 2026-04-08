@@ -690,6 +690,37 @@ def tank01_headers():
         "Accept":          "application/json",
     }
 
+
+async def resolve_tank01_player(player_id: str) -> dict:
+    """Resolve a Tank01 playerID to name+position using getPlayerInfo."""
+    pid = str(player_id)
+    with _tank01_id_lock:
+        if pid in _tank01_id_cache:
+            return _tank01_id_cache[pid]
+
+    pos_norm = {"PG":"PG","SG":"SG","SF":"SF","PF":"PF","C":"C",
+                "G":"PG","F":"SF","G-F":"SG","F-G":"SF","F-C":"PF","C-F":"C"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{TANK01_BASE}/getNBAPlayerInfo",
+                                 params={"playerID": pid},
+                                 headers=tank01_headers())
+            if not r.ok:
+                return {}
+            data = r.json()
+            body = data.get("body", {})
+            # body can be a dict or list
+            if isinstance(body, list):
+                body = body[0] if body else {}
+            name = body.get("longName") or body.get("name") or ""
+            pos  = pos_norm.get(body.get("pos",""), "SF")
+            result = {"name": name, "position": pos}
+            with _tank01_id_lock:
+                _tank01_id_cache[pid] = result
+            return result
+    except Exception:
+        return {}
+
 # ── Cache ────────────────────────────────────────────────────────
 _schedule_cache = {}   # date → games list
 _odds_cache     = {}   # gameID → odds
@@ -825,6 +856,9 @@ async def get_odds(gameID: str = Query(...)):
                 pos  = pos_norm.get(p.get("pos",""), "SF")
                 if pid and name:
                     id_map[pid] = {"name": name, "position": pos}
+                    # Also cache under any alternate ID formats
+                    with _tank01_id_lock:
+                        _tank01_id_cache[pid] = {"name": name, "position": pos}
         except Exception:
             pass
 
@@ -851,8 +885,12 @@ async def get_odds(gameID: str = Query(...)):
                 name      = info.get("name","")
                 position  = info.get("position","SF")
                 if not name:
+                    # Fallback: resolve via Tank01 playerInfo API
+                    fallback = await resolve_tank01_player(pid)
+                    name     = fallback.get("name","")
+                    position = fallback.get("position","SF")
+                if not name:
                     continue
-                for stat_key, line_val in prop_bets.items():
                     stat_type = TANK01_STAT_MAP.get(stat_key)
                     if not stat_type:
                         continue
