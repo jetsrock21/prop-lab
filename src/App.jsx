@@ -2130,8 +2130,21 @@ function EdgeFinder({ apiBase, onAnalyze }) {
         {gamesErr  && <div style={{color:"#ff7043",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",marginTop:"0.5rem"}}>{gamesErr}</div>}
       </div>
 
-      {allProps.length > 0 && (
+      {(allProps.length > 0 || (loadedCount === totalGames && totalGames > 0)) && (
         <div>
+          {/* No props message */}
+          {allProps.length === 0 && loadedCount === totalGames && totalGames > 0 && (
+            <div style={{textAlign:"center",padding:"2rem",color:"#2a4060",
+              fontFamily:"'JetBrains Mono',monospace",fontSize:"0.75rem",
+              background:"#080f1e",border:"1px solid #0e2040",borderRadius:12,marginBottom:"1rem"}}>
+              No props available for today's games yet.<br/>
+              <span style={{color:"#1e3050",fontSize:"0.65rem",marginTop:"0.5rem",display:"block"}}>
+                Books typically post props 2–3 hours before tip-off.
+              </span>
+            </div>
+          )}
+
+          {allProps.length > 0 && <>
           {/* Player search */}
           <input
             placeholder="Search player..."
@@ -2195,7 +2208,7 @@ function EdgeFinder({ apiBase, onAnalyze }) {
             const game = games.find(g=>g.gameID===prop.gameID);
             return (
               <div key={idx}
-                onClick={() => onAnalyze(prop.playerName, prop.statType, prop.line, prop.position, game)}
+                onClick={() => onAnalyze(prop.playerName, prop.statType, prop.line, prop.position, game, prop)}
                 style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:8,
                   padding:"0.6rem 0.85rem",marginBottom:"0.3rem",cursor:"pointer",
                   display:"flex",justifyContent:"space-between",alignItems:"center",
@@ -2227,6 +2240,7 @@ function EdgeFinder({ apiBase, onAnalyze }) {
               No props match your filters
             </div>
           )}
+          </>}
         </div>
       )}
     </div>
@@ -3244,32 +3258,37 @@ export default function App(){
 
           {/* ══ EDGE FINDER ══ */}
           {mainTab==="edge"&&(
-            <EdgeFinder apiBase={API_BASE} onAnalyze={async (player, statType, line, position, game) => {
-              // Derive opponent from gameID
+            <EdgeFinder apiBase={API_BASE} onAnalyze={async (player, statType, line, position, game, prop={}) => {
+              // Derive opponent — the team the player is NOT on
               let opp = "";
-              if (game?.gameID) {
-                try { opp = game.gameID.split("_")[1].split("@")[1]; } catch {}
+              if (game?.away && game?.home) {
+                // prop.team comes from the roster fetch in the backend
+                const playerTeam = prop?.team || "";
+                if (playerTeam && playerTeam.toUpperCase() === game.away.toUpperCase()) {
+                  opp = game.home;  // player is away, opponent is home
+                } else if (playerTeam && playerTeam.toUpperCase() === game.home.toUpperCase()) {
+                  opp = game.away;  // player is home, opponent is away
+                } else {
+                  // fallback: use home team (player assumed away)
+                  opp = game.home;
+                }
               }
 
-              // 1. Switch to lab + game log mode + scroll, clear stale results
-              setMainTab("lab");
-              setInputMode("gamelog");
-              setDone(false);
-              setSim(null);
-              setModel(null);
-              setPasteParsedLogs([]);
-              setPasteParsedH2H([]);
+              // 1. Clear stale state, switch to lab
+              setDone(false); setSim(null); setModel(null);
+              setPasteParsedLogs([]); setPasteParsedH2H([]);
               pendingAnalyzeRef.current = false;
+              setMainTab("lab");
               window.scrollTo({top:0,behavior:"smooth"});
 
-              // 2. Set form fields
+              // 2. Set form: stat type, prop line, player name
               setLogForm(f=>({...f, statType, propLine:String(line), playerName:player}));
 
               // 3. Set DvP position + opponent
               dvp.setPosition(position||"PG");
               setDvpOpp(opp);
 
-              // 4. Find player ID
+              // 4. Find player in bbref list
               let matchId = null, matchName = player;
               try {
                 const sr = await fetch(`${API_BASE}/players/search?q=${encodeURIComponent(player.split(" ").slice(-1)[0])}`);
@@ -3279,51 +3298,50 @@ export default function App(){
                 if (m) { matchId = m.id; matchName = m.full_name; }
               } catch {}
 
-              // 5. Set NBA player state (fills the search box + enables Load)
-              if (matchId) {
-                nba.setPlayerId(matchId);
-                nba.setPlayerName(matchName);
-                nba.setOpponent(opp);
-                nba.setLoaded(false);
-                nba.setError("");
+              if (!matchId) return;
 
-                // 6. Load game logs
-                const data = await nba.loadData(matchId, matchName, statType);
+              // 5. Set nba hook state
+              nba.setPlayerId(matchId);
+              nba.setPlayerName(matchName);
+              nba.setOpponent(opp);
+              nba.setLoaded(false);
+              nba.setError("");
 
-                if (data) {
-                  // 7. Apply game limit + min filter (reuse handleNBALoad logic)
-                  const limit = parseInt(gameLimit) || 0;
-                  const minMin = parseFloat(minFilter) || 0;
-                  const allLogs = data.recent_logs || [];
-                  const filtered = minMin > 0 ? allLogs.filter(r=>parseFloat(r.min)>=minMin) : allLogs;
-                  const sliced  = limit > 0 ? filtered.slice(0, limit) : filtered;
-                  setPasteParsedLogs(sliced);
-                  if (opp && data.h2h_logs) setPasteParsedH2H(data.h2h_logs);
-                  setLogSubTab("paste");
+              // 6. Load via same handleNBALoad pipeline
+              const data = await nba.loadData(matchId, matchName, statType);
+              if (!data) return;
 
-                  // 8. Fill L5/L10/L20
-                  const calcW = (logs, n) => {
-                    const w = logs.slice(0,n);
-                    if (!w.length) return null;
-                    const stats = w.map(r=>parseFloat(r.stat)||0);
-                    const mins  = w.map(r=>parseFloat(r.min)||0);
-                    return {
-                      avg: +(stats.reduce((a,b)=>a+b,0)/stats.length).toFixed(1),
-                      mpg: +(mins.reduce((a,b)=>a+b,0)/mins.length).toFixed(1),
-                      median: +([...stats].sort((a,b)=>a-b)[Math.floor(stats.length/2)]).toFixed(1),
-                    };
-                  };
-                  const l5=calcW(sliced,5)||data.l5, l10=calcW(sliced,10)||data.l10, l20=calcW(sliced,20)||data.l20;
-                  const upd = {playerName: matchName};
-                  if(l5)  { upd.l5Avg=String(l5.avg);   upd.l5Mpg=String(l5.mpg);   upd.l5Med=String(l5.median); }
-                  if(l10) { upd.l10Avg=String(l10.avg);  upd.l10Mpg=String(l10.mpg);  upd.l10Med=String(l10.median); }
-                  if(l20) { upd.l20Avg=String(l20.avg);  upd.l20Mpg=String(l20.mpg);  upd.l20Med=String(l20.median); }
-                  setLogForm(f=>({...f, ...upd}));
+              const limit  = parseInt(gameLimit) || 0;
+              const minMin = parseFloat(minFilter) || 0;
+              const allLogs = data.recent_logs || [];
+              const filteredLogs = minMin > 0 ? allLogs.filter(r=>parseFloat(r.min)>=minMin) : allLogs;
+              const slicedLogs   = limit > 0 ? filteredLogs.slice(0, limit) : filteredLogs;
 
-                  // 9. Flag for auto-analyze — fires via useEffect once logs are in state
-                  pendingAnalyzeRef.current = true;
-                }
-              }
+              setPasteParsedLogs(slicedLogs);
+              if (opp && data.h2h_logs) setPasteParsedH2H(data.h2h_logs);
+
+              const calcW = (logs, n) => {
+                const w = logs.slice(0,n);
+                if (!w.length) return null;
+                const stats = w.map(r=>parseFloat(r.stat)||0);
+                const mins  = w.map(r=>parseFloat(r.min)||0);
+                return {
+                  avg:    +(stats.reduce((a,b)=>a+b,0)/stats.length).toFixed(1),
+                  mpg:    +(mins.reduce((a,b)=>a+b,0)/mins.length).toFixed(1),
+                  median: +([...stats].sort((a,b)=>a-b)[Math.floor(stats.length/2)]).toFixed(1),
+                };
+              };
+              const l5=calcW(slicedLogs,5)||data.l5;
+              const l10=calcW(slicedLogs,10)||data.l10;
+              const l20=calcW(slicedLogs,20)||data.l20;
+              const upd = {playerName: matchName, statType, propLine: String(line)};
+              if(l5)  { upd.l5Avg=String(l5.avg);  upd.l5Mpg=String(l5.mpg);  upd.l5Med=String(l5.median); }
+              if(l10) { upd.l10Avg=String(l10.avg); upd.l10Mpg=String(l10.mpg); upd.l10Med=String(l10.median); }
+              if(l20) { upd.l20Avg=String(l20.avg); upd.l20Mpg=String(l20.mpg); upd.l20Med=String(l20.median); }
+              setLogForm(f=>({...f,...upd}));
+
+              // 7. Flag pending analyze — fires via useEffect when pasteParsedLogs settles
+              pendingAnalyzeRef.current = true;
             }}/>
           )}
 
