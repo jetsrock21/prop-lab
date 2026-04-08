@@ -26,7 +26,9 @@ _player_cache  = None
 _player_lock   = threading.Lock()
 _gamelog_cache = {}   # (player_id, season) → processed logs
 _gamelog_lock  = threading.Lock()
-_slug_cache    = {}   # player_id → bbref slug
+_slug_cache    = {}
+_tank01_id_cache = {}   # tank01 playerID → {name, position}
+_tank01_id_lock  = threading.Lock()   # player_id → bbref slug
 
 BBREF_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
@@ -724,7 +726,7 @@ async def resolve_tank01_player(player_id: str) -> dict:
 # ── Cache ────────────────────────────────────────────────────────
 _schedule_cache = {}   # date → games list
 _odds_cache     = {}   # gameID → odds
-_roster_cache   = {}   # teamAbv → {playerName: position}
+_roster_cache   = {}   # teamAbv → roster
 
 
 @app.get("/edge/schedule")
