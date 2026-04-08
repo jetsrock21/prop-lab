@@ -2245,13 +2245,13 @@ const EMPTY_LOG={logs:[{min:"",stat:""},{min:"",stat:""},{min:"",stat:""}],h2hLo
 
 export default function App(){
   const [mainTab,setMainTab]=useState("lab");       // lab | edge | history
-  const [inputMode,setInputMode]=useState("summary"); // summary | gamelog
+  const [inputMode,setInputMode]=useState("gamelog"); // always gamelog now
   const [form,setForm]=useState(EMPTY_FORM);
   const [logForm,setLogForm]=useState(EMPTY_LOG);
   const [done,setDone]=useState(false);
   const pendingAnalyzeRef = useRef(false); // set true by Edge Finder to trigger analyze after state settles
   const [history,setHistory]=useState([]);
-  const [logSubTab,setLogSubTab]=useState("paste"); // paste | manual
+  const [logSubTab,setLogSubTab]=useState("manual"); // manual only now
   const [pasteParsedLogs,setPasteParsedLogs]=useState([]); // from paste parser
   const [pasteParsedH2H,setPasteParsedH2H]=useState([]);
   const [useRecency,setUseRecency]=useState(true);
@@ -2275,7 +2275,7 @@ export default function App(){
       : model?.projection;
   const activeDiff=effectiveProj&&activePropLine?effectiveProj-parseFloat(activePropLine):null;
   const activeDiffPct=activeDiff&&activePropLine?(activeDiff/parseFloat(activePropLine))*100:null;
-  const activeStatType = inputMode==="summary" ? form.statType : (logForm.statType||"Points");
+  const activeStatType = logForm.statType||"Points";
   const activeScore = (activeDiffPct!=null&&simStats) ? getEdgeScore({
     diffPct: activeDiffPct,
     overPct: simStats.overPct,
@@ -2477,11 +2477,8 @@ export default function App(){
     setSim(newSim);
   },[minutesOverride]);
 
-  const canGo = inputMode==="summary"
-    ? (form.prop&&(form.l5Avg||form.l10Avg||form.l20Avg))
-    : (logSubTab==="paste"
-        ? pasteParsedLogs.length>0
-        : logForm.logs.some(r=>parseFloat(r.min)>0&&parseFloat(r.stat)>=0&&r.stat!==""));
+  const canGo = pasteParsedLogs.some(r=>parseFloat(r.min)>0)
+    || logForm.logs.some(r=>parseFloat(r.min)>0&&parseFloat(r.stat)>=0);
 
   // Fire analyze when Edge Finder has loaded everything and flagged pendingAnalyzeRef
   useEffect(()=>{
@@ -2494,11 +2491,9 @@ export default function App(){
 
   const handleAnalyze=()=>{
     let m;
-    if(inputMode==="summary"){
-      m=buildSummaryModel({...form, statType:form.statType||'Points'});
-    } else {
-      const srcLogs = logSubTab==="paste" ? pasteParsedLogs : logForm.logs;
-      const srcH2H  = logSubTab==="paste" ? pasteParsedH2H  : (logForm.h2hLogs||[]);
+    {
+      const srcLogs = pasteParsedLogs.some(r=>parseFloat(r.min)>0) ? pasteParsedLogs : logForm.logs;
+      const srcH2H  = pasteParsedH2H.length>0 ? pasteParsedH2H : (logForm.h2hLogs||[]);
       const validLogs=srcLogs.map(r=>({min:parseFloat(r.min)||0,stat:parseFloat(r.stat)||0})).filter(r=>r.min>0&&r.stat>=0);
       const validH2H=srcH2H.map(r=>({min:parseFloat(r.min)||0,stat:parseFloat(r.stat)||0})).filter(r=>r.min>0&&r.stat>=0);
       m=buildGameLogModel({
@@ -2520,7 +2515,7 @@ export default function App(){
     setModel(m);
     setProjOverride("");
     setMinutesOverride(null);
-    const propLine=inputMode==="summary"?parseFloat(form.prop):parseFloat(logForm.propLine||0);
+    const propLine=parseFloat(logForm.propLine||0);
     setActivePropLine(String(propLine||""));
     const newSim=runMonteCarlo({
       meanRate:m.meanRate, sdRate:m.sdRate,
@@ -2566,11 +2561,10 @@ export default function App(){
   const SEC=(col="#4a9eff")=>({fontFamily:"'Black Han Sans',sans-serif",color:col,fontSize:"0.72rem",letterSpacing:"0.2em",textTransform:"uppercase",marginBottom:"0.75rem",paddingBottom:"0.4rem",borderBottom:"1px solid #1e3a5a"});
 
   // live projection preview while filling form
-  const liveModel=inputMode==="summary"&&form.prop&&(form.l5Avg||form.l10Avg||form.l20Avg)
-    ?buildSummaryModel({...form,statType:form.statType||'Points'}):null;
+  const liveModel=null;
 
-  const playerName=inputMode==="summary"?form.playerName:logForm.playerName;
-  const statType=inputMode==="summary"?form.statType:logForm.statType||"Stat";
+  const playerName=logForm.playerName;
+  const statType=logForm.statType||"Stat";
 
   return(
     <>
@@ -2600,175 +2594,10 @@ export default function App(){
             <>
               {!done&&(
                 <div>
-                  {/* input mode switcher */}
-                  <div style={{display:"flex",background:"#080f1e",border:"1px solid #0e2040",borderRadius:8,overflow:"hidden",marginBottom:"1rem"}}>
-                    {[["summary","📊 Summary (L5/L10/L20)"],["gamelog","📋 Game Logs"]].map(([m,label])=>(
-                      <button key={m} onClick={()=>setInputMode(m)} style={{flex:1,padding:"0.6rem",background:inputMode===m?"#1e3a5a":"transparent",color:inputMode===m?"#4a9eff":"#3a6080",border:"none",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"0.82rem",letterSpacing:"0.08em",cursor:"pointer",transition:"all 0.15s"}}>{label}</button>
-                    ))}
-                  </div>
-
                   <div style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:12,padding:"1.5rem",marginBottom:"1rem"}}>
 
-                    {/* ── SUMMARY INPUT ── */}
-                    {inputMode==="summary"&&(
-                      <>
-                        <div style={SEC()}>Player & Prop</div>
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"1rem"}}>
-                          <div><label style={L}>Player Name</label><input style={S} placeholder="e.g. LeBron James" value={form.playerName} onChange={e=>setF("playerName",e.target.value)}/></div>
-                          <div><label style={L}>Stat Type</label><select style={{...S,cursor:"pointer"}} value={form.statType} onChange={e=>setF("statType",e.target.value)}>{STAT_TYPES.map(s=><option key={s}>{s}</option>)}</select></div>
-                        </div>
-                        <div style={{marginBottom:"1.5rem"}}>
-                          <label style={L}>Prop Line</label>
-                          <div style={{display:"flex",gap:"0.75rem",alignItems:"center"}}>
-                            <input style={{...S,fontSize:"1.4rem",fontWeight:600,padding:"0.65rem 0.75rem"}} placeholder="25.5" type="number" step="0.5" value={form.prop} onChange={e=>setF("prop",e.target.value)}/>
-                            {liveModel&&(
-                              <div style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:8,padding:"0.5rem 0.9rem",textAlign:"center",minWidth:80,flexShrink:0}}>
-                                <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.58rem"}}>PROJ</div>
-                                <div style={{color:"#4a9eff",fontFamily:"'Black Han Sans',sans-serif",fontSize:"1.5rem",lineHeight:1}}>{liveModel.projection.toFixed(1)}</div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        <div style={SEC()}>Player Averages (per window)</div>
-                        <div style={{display:"grid",gridTemplateColumns:"44px 1fr 1fr 1fr",gap:"0.4rem 0.6rem",alignItems:"end",marginBottom:"1.5rem"}}>
-                          <div/>
-                          <div style={{...L,textAlign:"center"}}>Avg</div>
-                          <div style={{...L,textAlign:"center"}}>Median <span style={{color:"#2a4060",fontSize:"0.6rem"}}>(opt)</span></div>
-                          <div style={{...L,textAlign:"center"}}>MPG</div>
-                          {[["L5","l5Avg","l5Med","l5Mpg"],["L10","l10Avg","l10Med","l10Mpg"],["L20","l20Avg","l20Med","l20Mpg"]].map(([lbl,ak,mdk,mk])=>(
-                            <>{/* */}
-                              <span key={lbl} style={{color:"#4a9eff",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"1rem",paddingBottom:"0.55rem"}}>{lbl}</span>
-                              <input key={ak} style={S} placeholder="29.0" type="number" step="0.1" value={form[ak]} onChange={e=>setF(ak,e.target.value)}/>
-                              <input key={mdk} style={{...S,borderColor:"#1a3050"}} placeholder="27.0" type="number" step="0.1" value={form[mdk]} onChange={e=>setF(mdk,e.target.value)}/>
-                              <input key={mk} style={S} placeholder="25" type="number" step="0.1" value={form[mk]} onChange={e=>setF(mk,e.target.value)}/>
-                            </>
-                          ))}
-                        </div>
-
-                        <div style={SEC()}>Opponent Matchup <span style={{color:"#3a6080",fontWeight:400,fontSize:"0.7rem"}}>(optional)</span></div>
-                        <DvPPanel
-                          statType={form.statType||"Points"}
-                          dvp={dvp}
-                          currentOpp={dvpOpp}
-                          onOppChange={setDvpOpp}
-                          onFill={handleDvpFillSummary}
-                        />
-                        <div style={{background:"#050d1a",border:"1px solid #1e3a5a",borderRadius:8,padding:"0.9rem",marginBottom:"1.5rem"}}>
-                          <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",marginBottom:"0.65rem"}}>
-                            Auto-filled from DvP sheet · all values are per-game averages · edit freely.
-                          </div>
-                          {/* L5/L10/L20 opp allowed grid */}
-                          <div style={{display:"grid",gridTemplateColumns:"44px 1fr 1fr",gap:"0.4rem 0.75rem",alignItems:"end",marginBottom:"0.75rem"}}>
-                            <div/>
-                            <div style={{...L,textAlign:"center",color:"#3a6080"}}>Opp Avg/Game ({form.statType})</div>
-                            <div style={{...L,textAlign:"center",color:"#3a6080"}}>Rate (/game)</div>
-                            {[["L5","l5OppAllowed"],["L10","l10OppAllowed"],["L20","l20OppAllowed"]].map(([lbl,k])=>{
-                              const v=parseFloat(form[k])||0;
-                              const rate=v>0?v.toFixed(2):null;
-                              return(<>
-                                <span key={lbl} style={{color:"#4a9eff",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"1rem",paddingBottom:"0.55rem"}}>{lbl}</span>
-                                <input key={k} style={S} placeholder="e.g. 32.4" type="number" step="0.1" value={form[k]} onChange={e=>setF(k,e.target.value)}/>
-                                <div key={k+"r"} style={{background:"#0a1628",borderRadius:6,padding:"0.55rem 0.5rem",textAlign:"center",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.85rem",color:rate?"#ffee58":"#2a4060"}}>
-                                  {rate||"—"}
-                                </div>
-                              </>);
-                            })}
-                          </div>
-                          <div>
-                            <label style={{...L,color:"#3a6080"}}>League Avg Allowed (same span/position) <span style={{color:"#2a4060",fontWeight:400}}>(opt)</span></label>
-                            <div style={{display:"flex",gap:"0.75rem",alignItems:"center"}}>
-                              <input style={{...S,flexShrink:0}} placeholder="e.g. 28.5" type="number" step="0.1" value={form.leagueAvgAllowed} onChange={e=>setF("leagueAvgAllowed",e.target.value)}/>
-                              {form.leagueAvgAllowed&&parseFloat(form.leagueAvgAllowed)>0&&(
-                                <span style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",whiteSpace:"nowrap"}}>{parseFloat(form.leagueAvgAllowed).toFixed(2)}/game</span>
-                              )}
-                            </div>
-                          </div>
-                          {/* Live matchup label */}
-                          {(form.l5OppAllowed||form.l10OppAllowed||form.l20OppAllowed)&&form.leagueAvgAllowed&&(()=>{
-                            const oppVals=[{v:parseFloat(form.l5OppAllowed)||0,w:0.5},{v:parseFloat(form.l10OppAllowed)||0,w:0.3},{v:parseFloat(form.l20OppAllowed)||0,w:0.2}].filter(x=>x.v>0);
-                            if(!oppVals.length) return null;
-                            const tw=oppVals.reduce((a,b)=>a+b.w,0);
-                            const wOpp=oppVals.reduce((a,b)=>a+b.v*(b.w/tw),0);
-                            const ratio=wOpp/(parseFloat(form.leagueAvgAllowed)||1);
-                            const col=ratio>1.05?"#00e676":ratio<0.95?"#ff7043":"#ffee58";
-                            const lbl=ratio>1.05?"🟢 EASY MATCHUP":ratio<0.95?"🔴 TOUGH MATCHUP":"🟡 NEUTRAL";
-                            return <div style={{marginTop:"0.6rem",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                              <span style={{color:col,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.8rem",letterSpacing:"0.05em"}}>{lbl}</span>
-                              <span style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.6rem"}}>ratio {ratio.toFixed(2)}×</span>
-                            </div>;
-                          })()}
-                        </div>
-                        {/* H2H summary */}                        {/* H2H summary */}
-                        <div style={{...SEC("#ff9800")}}>H2H vs This Opponent <span style={{color:"#3a6080",fontWeight:400,fontSize:"0.7rem"}}>(optional)</span></div>
-                        <div style={{background:"#050d1a",border:"1px solid #1a2a0a",borderRadius:8,padding:"1rem",marginBottom:"1.5rem"}}>
-                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"0.75rem"}}>
-                            <div><label style={{...L,color:"#ff9800"}}>H2H Avg</label><input style={{...S,borderColor:"#2a3a1a"}} placeholder="22.0" type="number" step="0.1" value={form.h2hAvg} onChange={e=>setF("h2hAvg",e.target.value)}/></div>
-                            <div><label style={{...L,color:"#ff9800"}}># H2H Games</label><input style={{...S,borderColor:"#2a3a1a"}} placeholder="3" type="number" min="1" value={form.h2hGames} onChange={e=>setF("h2hGames",e.target.value)}/></div>
-                          </div>
-                          {form.h2hGames&&parseInt(form.h2hGames)>0&&<H2HBar games={parseInt(form.h2hGames)}/>}
-                        </div>
-
-                        <div style={SEC()}>Tonight</div>
-                        <div style={{marginBottom:"1.5rem"}}>
-                          <label style={L}>Projected Minutes</label>
-                          <input style={{...S,fontSize:"1.2rem"}} placeholder="32" type="number" step="0.5" value={form.projMin} onChange={e=>setF("projMin",e.target.value)}/>
-                        </div>
-                      </>
-                    )}
-
-                    {/* ── RECENCY WEIGHTING (game log mode only) ── */}
-                    {inputMode==="gamelog"&&(
-                      <div style={{marginBottom:"1.25rem",background:"#050d1a",border:"1px solid #1e3a5a",borderRadius:8,padding:"0.9rem 1rem"}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:useRecency?"0.75rem":0}}>
-                          <div>
-                            <div style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",fontSize:"0.72rem",letterSpacing:"0.15em",textTransform:"uppercase"}}>Recency Weighting</div>
-                            <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.6rem",marginTop:"0.15rem"}}>Recent games count more toward projection</div>
-                          </div>
-                          {/* Toggle */}
-                          <div onClick={()=>setUseRecency(v=>!v)} style={{cursor:"pointer",width:44,height:24,background:useRecency?"#4a9eff":"#1e3a5a",borderRadius:12,position:"relative",transition:"background 0.2s",flexShrink:0}}>
-                            <div style={{position:"absolute",top:3,left:useRecency?23:3,width:18,height:18,background:useRecency?"#050d1a":"#3a6080",borderRadius:"50%",transition:"left 0.2s"}}/>
-                          </div>
-                        </div>
-                        {useRecency&&(
-                          <div>
-                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:"0.35rem"}}>
-                              <span style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",letterSpacing:"0.06em"}}>DECAY STRENGTH</span>
-                              <span style={{color:"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.72rem",fontWeight:600}}>{decayStrength.toFixed(2)}</span>
-                            </div>
-                            <input type="range" min="0.05" max="0.20" step="0.01"
-                              value={decayStrength}
-                              onChange={e=>setDecayStrength(parseFloat(e.target.value))}
-                              style={{width:"100%",accentColor:"#4a9eff",cursor:"pointer"}}
-                            />
-                            <div style={{display:"flex",justifyContent:"space-between",marginTop:"0.2rem"}}>
-                              <span style={{color:"#2a4060",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem"}}>0.05 subtle</span>
-                              <span style={{color:"#2a4060",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem"}}>0.20 aggressive</span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* ── SIM COUNT SELECTOR (both modes) ── */}
-                    <div style={{marginBottom:"1.25rem"}}>
-                      <div style={{fontFamily:"'Black Han Sans',sans-serif",color:"#3a6080",fontSize:"0.72rem",letterSpacing:"0.2em",textTransform:"uppercase",marginBottom:"0.6rem",paddingBottom:"0.4rem",borderBottom:"1px solid #1e3a5a",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                        <span>Monte Carlo Simulations</span>
-                        <span style={{color:"#4a9eff",fontSize:"0.9rem"}}>{simIters.toLocaleString()}</span>
-                      </div>
-                      <div style={{display:"flex",gap:"0.4rem"}}>
-                        {SIM_PRESETS.map(n=>(
-                          <button key={n} onClick={()=>setSimIters(n)} style={{flex:1,padding:"0.4rem 0",background:simIters===n?"#4a9eff":"#0a1628",color:simIters===n?"#050d1a":"#3a6080",border:`1px solid ${simIters===n?"#4a9eff":"#1e3a5a"}`,borderRadius:6,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",cursor:"pointer",transition:"all 0.15s"}}>
-                            {n>=1000?`${n/1000}k`:n}
-                          </button>
-                        ))}
-                      </div>
-                      <div style={{color:"#2a4060",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.6rem",marginTop:"0.4rem"}}>Higher = more accurate tails · slower run · 10k is a good default</div>
-                    </div>
-
                     {/* ── GAME LOG INPUT ── */}
-                    {inputMode==="gamelog"&&(
-                      <>
+                    <>
                         <div style={SEC()}>Player Info</div>
 
                         {/* Stat Type row */}
@@ -2972,84 +2801,10 @@ export default function App(){
                           )}
                         </div>
 
-                        {/* paste / manual sub-tab switcher */}
-                        <div style={{display:"flex",background:"#050d1a",border:"1px solid #1e3a5a",borderRadius:8,overflow:"hidden",marginBottom:"1.25rem"}}>
-                          {[["paste","📋 Paste Raw Text"],["manual","✏️ Manual Entry"]].map(([m,lbl])=>(
-                            <button key={m} onClick={()=>setLogSubTab(m)} style={{flex:1,padding:"0.5rem 0",background:logSubTab===m?"#1e3a5a":"transparent",color:logSubTab===m?"#4a9eff":"#3a6080",border:"none",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"0.8rem",letterSpacing:"0.08em",cursor:"pointer",transition:"all 0.15s"}}>{lbl}</button>
-                          ))}
-                        </div>
 
-                        {/* PASTE MODE */}
-                        {logSubTab==="paste"&&(
-                          <>
-                            <PasteLogPanel
-                              statType={logForm.statType||"Points"}
-                              onParsed={rows=>{setPasteParsedLogs(rows);}}
-                              onH2HParsed={rows=>{setPasteParsedH2H(rows);}}
-                              useRecency={useRecency}
-                              decayStrength={decayStrength}
-                            />
-                            {pasteParsedLogs.length>0&&(
-                              <div style={{marginTop:"0.5rem",color:"#00e676",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",textAlign:"center"}}>
-                                ✓ {pasteParsedLogs.length} games ready · {pasteParsedH2H.length>0?`${pasteParsedH2H.length} H2H games ready`:"no H2H"}
-                              </div>
-                            )}
-                            <div style={{marginTop:"1.25rem",marginBottom:"1rem"}}>
-                              <div style={SEC()}>Opponent Matchup <span style={{color:"#3a6080",fontWeight:400,fontSize:"0.7rem"}}>(optional)</span></div>
-                              <DvPPanel
-                                statType={logForm.statType||"Points"}
-                                dvp={dvp}
-                                currentOpp={dvpOpp}
-                                onOppChange={setDvpOpp}
-                                onFill={handleDvpFillLog}
-                              />
-                              <div style={{background:"#050d1a",border:"1px solid #1e3a5a",borderRadius:8,padding:"0.75rem"}}>
-                                <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.6rem",marginBottom:"0.65rem"}}>
-                                  Auto-filled from DvP sheet · all values are per-game averages · edit freely
-                                </div>
-                                <div style={{display:"grid",gridTemplateColumns:"44px 1fr 1fr",gap:"0.4rem 0.75rem",alignItems:"end",marginBottom:"0.75rem"}}>
-                                  <div/>
-                                  <div style={{...L,textAlign:"center",color:"#3a6080"}}>Opp Avg/Game</div>
-                                  <div style={{...L,textAlign:"center",color:"#3a6080"}}>Rate (/game)</div>
-                                  {[["L5","l5OppAllowed"],["L10","l10OppAllowed"],["L20","l20OppAllowed"]].map(([lbl,k])=>{
-                                    const v=parseFloat(logForm[k])||0;
-                                    const rate=v>0?v.toFixed(2):null;
-                                    return(<>
-                                      <span key={lbl} style={{color:"#4a9eff",fontFamily:"'Barlow Condensed',sans-serif",fontWeight:700,fontSize:"1rem",paddingBottom:"0.55rem"}}>{lbl}</span>
-                                      <input key={k} style={S} placeholder="e.g. 32.4" type="number" step="0.1" value={logForm[k]||""} onChange={e=>setLF(k,e.target.value)}/>
-                                      <div key={k+"r"} style={{background:"#0a1628",borderRadius:6,padding:"0.55rem 0.5rem",textAlign:"center",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.85rem",color:rate?"#ffee58":"#2a4060"}}>{rate||"—"}</div>
-                                    </>);
-                                  })}
-                                </div>
-                                <div>
-                                  <label style={{...L,color:"#3a6080"}}>League Avg Allowed (same span)</label>
-                                  <div style={{display:"flex",gap:"0.75rem",alignItems:"center"}}>
-                                    <input style={{...S,flexShrink:0}} placeholder="e.g. 28.5" type="number" step="0.1" value={logForm.leagueAvgAllowed||""} onChange={e=>setLF("leagueAvgAllowed",e.target.value)}/>
-                                    {logForm.leagueAvgAllowed&&parseFloat(logForm.leagueAvgAllowed)>0&&(
-                                      <span style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",whiteSpace:"nowrap"}}>{parseFloat(logForm.leagueAvgAllowed).toFixed(2)}/game avg</span>
-                                    )}
-                                  </div>
-                                </div>
-                                {(logForm.l5OppAllowed||logForm.l10OppAllowed||logForm.l20OppAllowed)&&logForm.leagueAvgAllowed&&(()=>{
-                                  const ov=[{v:parseFloat(logForm.l5OppAllowed)||0,w:0.5},{v:parseFloat(logForm.l10OppAllowed)||0,w:0.3},{v:parseFloat(logForm.l20OppAllowed)||0,w:0.2}].filter(x=>x.v>0);
-                                  const tw=ov.reduce((a,b)=>a+b.w,0)||1;
-                                  const wOpp=ov.reduce((a,b)=>a+b.v*(b.w/tw),0);
-                                  const ratio=wOpp/(parseFloat(logForm.leagueAvgAllowed)||1);
-                                  const col=ratio>1.05?"#00e676":ratio<0.95?"#ff7043":"#ffee58";
-                                  const lbl=ratio>1.05?"🟢 EASY MATCHUP":ratio<0.95?"🔴 TOUGH MATCHUP":"🟡 NEUTRAL";
-                                  return <div style={{marginTop:"0.6rem",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                                    <span style={{color:col,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.8rem"}}>{lbl}</span>
-                                    <span style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.6rem"}}>ratio {ratio.toFixed(2)}×</span>
-                                  </div>;
-                                })()}
-                              </div>
-                            </div>
-                          </>
-                        )}
 
-                        {/* MANUAL MODE */}
-                        {logSubTab==="manual"&&(
-                          <>
+                        {/* MANUAL ENTRY */}
+                        <>
                             <div style={SEC()}>Recent Game Logs <span style={{color:"#3a6080",fontWeight:400,fontSize:"0.7rem"}}>(newest first)</span></div>
                             <div style={{marginBottom:"1.5rem"}}>
                               <GameLogEditor logs={logForm.logs} onChange={v=>setLF("logs",v)}/>
