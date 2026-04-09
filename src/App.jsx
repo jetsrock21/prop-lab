@@ -2200,6 +2200,14 @@ function EdgeFinder({
                       fontSize:"0.58rem",marginLeft:"0.5rem"}}>{prop.away}@{prop.home}</span>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:"0.6rem"}}>
+                    {prop.spread!=null&&Math.abs(prop.spread)>=5&&(
+                      <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",
+                        color:Math.abs(prop.spread)>=10?"#ff7043":"#ffee58",
+                        background:Math.abs(prop.spread)>=10?"#1a0800":"#1a1600",
+                        padding:"0.1rem 0.35rem",borderRadius:3}}>
+                        {prop.spread>0?"+":""}{prop.spread}
+                      </span>
+                    )}
                     <span style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:4,
                       padding:"0.1rem 0.4rem",fontFamily:"'JetBrains Mono',monospace",
                       fontSize:"0.58rem",color:"#4a9eff"}}>{prop.statType}</span>
@@ -2267,6 +2275,10 @@ export default function App(){
   const [activePropLine,setActivePropLine]=useState(""); // editable in results
   const [projOverride,setProjOverride]=useState(""); // manual projection override
   const [minutesOverride,setMinutesOverride]=useState(null); // null = use model.pMin
+  const [blowoutLossStats, setBlowoutLossStats] = useState(null);
+  const [blowoutWinStats,  setBlowoutWinStats]  = useState(null);
+  const [seasonAvgMin,     setSeasonAvgMin]      = useState(null);
+  const [gameSpread,       setGameSpread]        = useState(null);
   const simStats=sim&&activePropLine?calcSimStats(sim.outcomes,parseFloat(activePropLine)):null;
 
   // derived: if user overrides projection, recalc grade/rec against that
@@ -2440,6 +2452,9 @@ export default function App(){
     if (l10) { updates.l10Avg = String(l10.avg); updates.l10Mpg = String(l10.mpg); updates.l10Med = String(l10.median); }
     if (l20) { updates.l20Avg = String(l20.avg); updates.l20Mpg = String(l20.mpg); updates.l20Med = String(l20.median); }
     setLogForm(f => ({ ...f, ...updates }));
+    if (data.blowout_loss_stats) setBlowoutLossStats(data.blowout_loss_stats);
+    if (data.blowout_win_stats)  setBlowoutWinStats(data.blowout_win_stats);
+    if (data.season_avg_min)     setSeasonAvgMin(data.season_avg_min);
   };
 
   // rerun sim if projOverride changes (using new mean rate centered on override)
@@ -2932,6 +2947,74 @@ export default function App(){
                       const maxSlider = Math.round((basePMin+10)*2)/2;
                       const diffMin = +(activePMin - basePMin).toFixed(1);
                       return(
+                        {/* ── BLOWOUT RISK ── */}
+                        {(()=>{
+                          // Determine blowout risk from gameSpread
+                          // gameSpread: negative = player's team favored, positive = underdog
+                          const spread = gameSpread;
+                          if (spread == null) return null;
+
+                          // Favored team (neg spread) → look at blowoutWinStats (won by 12+)
+                          // Underdog team (pos spread) → look at blowoutLossStats (lost by 8+)
+                          const isFavored = spread < 0;
+                          const absSpread = Math.abs(spread);
+                          const relevantStats = isFavored ? blowoutWinStats : blowoutLossStats;
+
+                          // Only show MOD (5-9) or HIGH (10+) risk
+                          if (absSpread < 5) return null;
+
+                          const riskLevel = absSpread >= 10 ? "HIGH" : "MOD";
+                          const riskColor = riskLevel === "HIGH" ? "#ff7043" : "#ffee58";
+                          const riskBg    = riskLevel === "HIGH" ? "#1a0800" : "#1a1600";
+                          const label     = isFavored
+                            ? `${riskLevel === "HIGH" ? "🔴" : "🟡"} ${riskLevel} GARBAGE TIME RISK`
+                            : `${riskLevel === "HIGH" ? "🔴" : "🟡"} ${riskLevel} BLOWOUT RISK`;
+
+                          const minPct = relevantStats && seasonAvgMin
+                            ? Math.round((relevantStats.avg_min / seasonAvgMin) * 100)
+                            : null;
+
+                          return (
+                            <div style={{background:riskBg,border:`1px solid ${riskColor}40`,
+                              borderRadius:8,padding:"0.65rem 0.85rem",marginBottom:"0.75rem"}}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                <span style={{fontFamily:"'Black Han Sans',sans-serif",color:riskColor,
+                                  fontSize:"0.72rem",letterSpacing:"0.1em"}}>{label}</span>
+                                <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",
+                                  fontSize:"0.62rem"}}>spread {spread > 0 ? "+" : ""}{spread}</span>
+                              </div>
+                              {relevantStats && relevantStats.games >= 2 && (
+                                <div style={{marginTop:"0.4rem",display:"flex",gap:"1.25rem",flexWrap:"wrap"}}>
+                                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",color:"#3a6080"}}>
+                                    <span style={{color:"#e8f4fd",fontWeight:700}}>{relevantStats.games}</span> similar games
+                                  </span>
+                                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",color:"#3a6080"}}>
+                                    avg min <span style={{color:minPct!=null&&minPct<85?"#ff7043":"#ffee58",fontWeight:700}}>
+                                      {relevantStats.avg_min}
+                                    </span>
+                                    {seasonAvgMin&&<span style={{color:"#2a4060"}}> vs {seasonAvgMin} season</span>}
+                                  </span>
+                                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",color:"#3a6080"}}>
+                                    avg stat <span style={{color:"#e8f4fd",fontWeight:700}}>{relevantStats.avg_stat}</span>
+                                  </span>
+                                  {minPct!=null&&(
+                                    <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",
+                                      color:minPct<85?"#ff7043":minPct<95?"#ffee58":"#00e676",fontWeight:700}}>
+                                      {minPct}% min retention
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              {(!relevantStats || relevantStats.games < 2) && (
+                                <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",
+                                  color:"#2a4060",marginTop:"0.3rem"}}>
+                                  No comparable margin games this season
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
                         <div style={{background:"#0a1628",borderRadius:8,padding:"0.75rem",marginBottom:"1rem"}}>
                           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.5rem"}}>
                             <span style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",letterSpacing:"0.08em"}}>PROJ MINUTES</span>
@@ -3237,7 +3320,7 @@ export default function App(){
                   {/* BUTTONS */}
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.75rem"}}>
                     <button onClick={()=>{setDone(false);setSim(null);setModel(null);window.scrollTo({top:0,behavior:'smooth'});}} style={{padding:"0.8rem",background:"transparent",color:"#4a9eff",border:"1px solid #1e3a5a",borderRadius:8,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.95rem",letterSpacing:"0.1em",cursor:"pointer"}}>✏️ EDIT</button>
-                    <button onClick={()=>{setForm(EMPTY_FORM);setLogForm(EMPTY_LOG);setModel(null);setSim(null);setDone(false);setProjOverride("");setActivePropLine("");setMinutesOverride(null);setPasteParsedLogs([]);setPasteParsedH2H([]);setGameLimit(0);setMinFilter(0);nba.setPlayerId(null);nba.setPlayerName("");nba.setLoaded(false);nba.setError("");setDvpOpp("");window.scrollTo({top:0,behavior:'smooth'});}} style={{padding:"0.8rem",background:"transparent",color:"#3a6080",border:"1px solid #1e3a5a",borderRadius:8,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.95rem",letterSpacing:"0.1em",cursor:"pointer"}}>+ NEW PROP</button>
+                    <button onClick={()=>{setForm(EMPTY_FORM);setLogForm(EMPTY_LOG);setModel(null);setSim(null);setDone(false);setProjOverride("");setActivePropLine("");setMinutesOverride(null);setPasteParsedLogs([]);setPasteParsedH2H([]);setGameLimit(0);setMinFilter(0);nba.setPlayerId(null);nba.setPlayerName("");nba.setLoaded(false);nba.setError("");setDvpOpp("");setBlowoutLossStats(null);setBlowoutWinStats(null);setSeasonAvgMin(null);setGameSpread(null);window.scrollTo({top:0,behavior:'smooth'});}} style={{padding:"0.8rem",background:"transparent",color:"#3a6080",border:"1px solid #1e3a5a",borderRadius:8,fontFamily:"'Black Han Sans',sans-serif",fontSize:"0.95rem",letterSpacing:"0.1em",cursor:"pointer"}}>+ NEW PROP</button>
                   </div>
                 </div>
               )}
@@ -3312,6 +3395,13 @@ export default function App(){
               // 6. Load via same handleNBALoad pipeline (pass opp explicitly)
               const data = await nba.loadData(matchId, matchName, statType, opp);
               if (!data) return;
+
+              // Store blowout stats from API response
+              if (data.blowout_loss_stats) setBlowoutLossStats(data.blowout_loss_stats);
+              if (data.blowout_win_stats)  setBlowoutWinStats(data.blowout_win_stats);
+              if (data.season_avg_min)     setSeasonAvgMin(data.season_avg_min);
+              // Store spread from prop (negative = player's team favored)
+              if (prop?.spread != null)    setGameSpread(prop.spread);
 
               const limit  = parseInt(gameLimit) || 0;
               const minMin = parseFloat(minFilter) || 0;
