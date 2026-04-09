@@ -2939,16 +2939,8 @@ export default function App(){
                       </div>
                     </div>
 
-                    {/* Minutes Slider */}
+                    {/* ── BLOWOUT RISK ── */}
                     {(()=>{
-                      const basePMin = model.pMin||30;
-                      const activePMin = minutesOverride!=null ? minutesOverride : basePMin;
-                      const minSlider = Math.max(1, Math.round((basePMin-10)*2)/2);
-                      const maxSlider = Math.round((basePMin+10)*2)/2;
-                      const diffMin = +(activePMin - basePMin).toFixed(1);
-                      return(
-                        {/* ── BLOWOUT RISK ── */}
-                        {(()=>{
                           // Determine blowout risk from gameSpread
                           // gameSpread: negative = player's team favored, positive = underdog
                           const spread = gameSpread;
@@ -3013,8 +3005,16 @@ export default function App(){
                               )}
                             </div>
                           );
-                        })()}
+                    })()}
 
+                    {/* Minutes Slider */}
+                    {(()=>{
+                      const basePMin = model.pMin||30;
+                      const activePMin = minutesOverride!=null ? minutesOverride : basePMin;
+                      const minSlider = Math.max(1, Math.round((basePMin-10)*2)/2);
+                      const maxSlider = Math.round((basePMin+10)*2)/2;
+                      const diffMin = +(activePMin - basePMin).toFixed(1);
+                      return(
                         <div style={{background:"#0a1628",borderRadius:8,padding:"0.75rem",marginBottom:"1rem"}}>
                           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.5rem"}}>
                             <span style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.65rem",letterSpacing:"0.08em"}}>PROJ MINUTES</span>
