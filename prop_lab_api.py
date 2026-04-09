@@ -554,6 +554,31 @@ def version():
     return {"version": "HTMLParser-v4", "uses_gamelog_parser": True}
 
 
+@app.get("/debug/raw-row/{player_id}")
+async def debug_raw_row(player_id: int, season: str = Query("2025-26")):
+    """Show first 3 raw rows with ALL fields to check game_result field name."""
+    all_p  = get_all_players()
+    player = next((p for p in all_p if p["id"] == player_id), None)
+    if not player:
+        return {"error": "not found"}
+    season_year = int(season.split("-")[0]) + 1
+    try:
+        slug = await find_bbref_slug(player_id, player["full_name"], season_year)
+        rows = await fetch_bbref_gamelog(slug, season_year)
+        if rows:
+            return {
+                "first_row_all_keys": list(rows[0].keys()),
+                "first_row": rows[0],
+                "second_row": rows[1] if len(rows)>1 else {},
+                "game_result_val": rows[0].get("game_result","NOT FOUND"),
+                "game_season_val": rows[0].get("game_season","NOT FOUND"),
+                "game_date_val": rows[0].get("date","NOT FOUND"),
+            }
+        return {"error": "no rows"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/debug/rows/{player_id}")
 async def debug_rows(player_id: int, season: str = Query("2025-26")):
     """Show raw parsed row data from first 3 rows."""
