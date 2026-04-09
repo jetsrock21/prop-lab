@@ -741,10 +741,10 @@ async def get_schedule(gameDate: str = Query(...)):
     if not RAPIDAPI_KEY:
         raise HTTPException(status_code=500, detail="RAPIDAPI_KEY not set in environment.")
 
-    # Use getBettingOdds with itemFormat=list to get correct gameIDs
+    # Use getNBABettingOdds with playerProps=true to get gameIDs that match odds endpoint
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(f"{TANK01_BASE}/getNBABettingOdds",
-                             params={"gameDate": gameDate, "itemFormat": "list"},
+                             params={"gameDate": gameDate, "playerProps": "true", "itemFormat": "list"},
                              headers=tank01_headers())
         r.raise_for_status()
         data = r.json()
@@ -754,6 +754,7 @@ async def get_schedule(gameDate: str = Query(...)):
     game_list = body if isinstance(body, list) else list(body.values())
     for g in game_list:
         if not isinstance(g, dict): continue
+        if not g.get("gameID"): continue
         games.append({
             "gameID":     g.get("gameID", ""),
             "away":       g.get("awayTeam", ""),
