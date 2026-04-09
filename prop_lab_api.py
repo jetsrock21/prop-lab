@@ -158,6 +158,32 @@ def parse_min(v) -> float:
     try: return float(s)
     except: return 0.0
 
+
+def parse_margin(game_result: str) -> Optional[int]:
+    """
+    Parse score margin from bbref game_result field.
+    e.g. 'W (+8)' → +8  (won by 8)
+         'L (-15)' → -15 (lost by 15)
+    Positive = player's team won by that amount.
+    Negative = player's team lost by that amount.
+    """
+    if not game_result:
+        return None
+    # Find last signed integer in parens, e.g. (+8) or (-15)
+    matches = re.findall(r'\(([+-]?\d+)\)', game_result)
+    if matches:
+        try:
+            val = int(matches[-1])
+            # If result starts with W, margin is positive; L, negative
+            if game_result.strip().startswith('L') and val > 0:
+                val = -val
+            elif game_result.strip().startswith('W') and val < 0:
+                val = abs(val)
+            return val
+        except ValueError:
+            pass
+    return None
+
 def window_stats(logs, n):
     w = logs[:n]
     if not w: return None
@@ -436,10 +462,18 @@ async def get_gamelogs(
         min_val  = parse_min(row.get("mp", ""))
         if min_val < 1:
             continue
-        stat_val = extract_stat(row, stat_type)
-        opp      = row.get("opp_name_abbr", "").strip()
-        date     = row.get("date", "")[:10]
-        logs.append({"date": date, "min": round(min_val, 1), "stat": round(stat_val, 1), "opponent": opp})
+        stat_val    = extract_stat(row, stat_type)
+        opp         = row.get("opp_name_abbr", "").strip()
+        date        = row.get("date", "")[:10]
+        game_result = row.get("game_result", "")
+        margin      = parse_margin(game_result)
+        logs.append({
+            "date":     date,
+            "min":      round(min_val, 1),
+            "stat":     round(stat_val, 1),
+            "opponent": opp,
+            "margin":   margin,   # +N = won by N, -N = lost by N, None = unknown
+        })
 
     # H2H filter
     h2h = []
@@ -450,7 +484,33 @@ async def get_gamelogs(
             for g in logs if g["opponent"].upper() == opp_up
         ]
 
-    def to_pl(gl): return [{"date": str(g.get("date","")),"min": str(g["min"]), "stat": str(g["stat"]), "opponent": str(g.get("opponent",""))} for g in gl]
+    def to_pl(gl): return [{
+        "date":     str(g.get("date","")),
+        "min":      str(g["min"]),
+        "stat":     str(g["stat"]),
+        "opponent": str(g.get("opponent","")),
+        "margin":   g.get("margin"),  # int or None
+    } for g in gl]
+
+    # Blowout/garbage time stats
+    # Positive margin = player's team won (garbage time risk for role players)
+    # Negative margin = player's team lost (blowout risk)
+    def margin_stats(margin_logs):
+        if not margin_logs: return None
+        mins  = [g["min"] for g in margin_logs]
+        stats = [g["stat"] for g in margin_logs]
+        return {
+            "games":    len(margin_logs),
+            "avg_min":  round(sum(mins)/len(mins), 1),
+            "avg_stat": round(sum(stats)/len(stats), 1),
+        }
+
+    # Games where team lost by 8+ (blowout loss)
+    blowout_loss = [g for g in logs if g.get("margin") is not None and g["margin"] <= -8]
+    # Games where team won by 12+ (garbage time / resting starters)
+    blowout_win  = [g for g in logs if g.get("margin") is not None and g["margin"] >= 12]
+    # Season avg minutes (all games)
+    season_avg_min = round(sum(g["min"] for g in logs) / len(logs), 1) if logs else 0
 
     return {
         "recent_logs": to_pl(logs),
@@ -458,6 +518,9 @@ async def get_gamelogs(
         "l5":          window_stats(logs, 5),
         "l10":         window_stats(logs, 10),
         "l20":         window_stats(logs, 20),
+        "season_avg_min":   season_avg_min,
+        "blowout_loss_stats": margin_stats(blowout_loss),  # team lost by 8+
+        "blowout_win_stats":  margin_stats(blowout_win),   # team won by 12+
         "total_games": len(logs),
         "season":      season,
         "opponents":   sorted(set(g["opponent"] for g in logs if g["opponent"])),
@@ -883,6 +946,24 @@ async def get_odds(gameID: str = Query(...)):
                            } == teams), None)
 
         if target:
+            # Extract consensus spread for blowout risk
+            # Spread convention: negative = home team favored
+            # We store it from the perspective of the AWAY team
+            spread_vals = []
+            for sb in target.get("sportsBooks", []):
+                odds = sb.get("odds", {})
+                try:
+                    away_spread = float(odds.get("awayTeamSpread", "").replace("+","") or 0)
+                    spread_vals.append(away_spread)
+                except Exception:
+                    pass
+            # Consensus: median of available spreads
+            game_away_spread = None
+            if spread_vals:
+                spread_vals.sort()
+                mid = len(spread_vals) // 2
+                game_away_spread = spread_vals[mid]
+
             for player_entry in target.get("playerProps", []):
                 pid       = str(player_entry.get("playerID",""))
                 prop_bets = player_entry.get("propBets", {})
@@ -904,12 +985,24 @@ async def get_odds(gameID: str = Query(...)):
                         line = float(line_val)
                     except Exception:
                         continue
+                    player_team = info.get("team", "").upper()
+                    # Spread from player's team perspective
+                    # positive = player's team is underdog, negative = favored
+                    if game_away_spread is not None and player_team:
+                        if player_team == away_team.upper():
+                            player_spread = game_away_spread
+                        else:
+                            player_spread = -game_away_spread
+                    else:
+                        player_spread = None
+
                     props.append({
                         "playerName": name,
                         "statType":   stat_type,
                         "line":       line,
                         "position":   position,
                         "team":       info.get("team", ""),
+                        "spread":     player_spread,
                     })
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to parse props: {e}")
