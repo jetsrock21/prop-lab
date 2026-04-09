@@ -268,13 +268,14 @@ function useNBAData() {
       .catch(() => {}); // keep default seasons on any error
   }, []);
 
-  const loadData = async (pid, pname, statType) => {
+  const loadData = async (pid, pname, statType, oppOverride) => {
     if (!pid) return;
     setLoading(true);
     setError("");
     setLoaded(false);
     try {
-      const url = `${API_BASE}/players/${pid}/gamelogs?stat_type=${encodeURIComponent(statType)}&season=${season}${opponent ? "&opponent=" + encodeURIComponent(opponent) : ""}`;
+      const opp = oppOverride !== undefined ? oppOverride : opponent;
+      const url = `${API_BASE}/players/${pid}/gamelogs?stat_type=${encodeURIComponent(statType)}&season=${season}${opp ? "&opponent=" + encodeURIComponent(opp) : ""}`;
       // Use a generous fetch timeout — stats.nba.com can be slow
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 90000); // 90s client timeout
@@ -2014,22 +2015,22 @@ function DvPPanel({ statType, dvp, onFill, currentOpp, onOppChange }) {
 // ═══════════════════════════════════════════════════════════════
 // EDGE FINDER COMPONENT
 // ═══════════════════════════════════════════════════════════════
-function EdgeFinder({ apiBase, onAnalyze }) {
-  const [gameDate,   setGameDate]   = useState(() => new Date().toISOString().slice(0,10).replace(/-/g,""));
-  const [games,      setGames]      = useState([]);
-  const [gamesLoad,  setGamesLoad]  = useState(false);
-  const [gamesErr,   setGamesErr]   = useState("");
-  const [allProps,   setAllProps]   = useState([]);   // all props across all games
-  const [propCache,  setPropCache]  = useState({});   // gameID → props[]
-  const [loading,    setLoading]    = useState(false);
-  const [loadedGames,setLoadedGames]= useState(new Set());
-  const [gameFilter, setGameFilter] = useState("All"); // "All" or gameID
-  const [statFilter, setStatFilter] = useState("All");
-  const [search,     setSearch]     = useState("");
-
+function EdgeFinder({
+  apiBase, onAnalyze,
+  gameDate, setGameDate,
+  games, setGames,
+  allProps, setAllProps,
+  propCache, setPropCache,
+  loadedGames, setLoadedGames,
+  loading, setLoading,
+  gamesLoad, setGamesLoad,
+  gamesErr, setGamesErr,
+  gameFilter, setGameFilter,
+  statFilter, setStatFilter,
+  search, setSearch,
+}) {
   const STAT_FILTERS = ["All","Points","Rebounds","Assists","3-Pointers","PRA","PR","PA","RA","Blocks","Steals"];
 
-  // Load schedule
   const loadGames = async (date) => {
     setGamesLoad(true); setGamesErr(""); setGames([]);
     setAllProps([]); setPropCache({}); setLoadedGames(new Set());
@@ -2039,49 +2040,54 @@ function EdgeFinder({ apiBase, onAnalyze }) {
       if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail||`HTTP ${r.status}`); }
       const data = await r.json();
       setGames(Array.isArray(data) ? data : []);
-      if (!data.length) setGamesErr("No games found for this date.");
+      if (!data?.length) setGamesErr("No games found for this date.");
     } catch(e) { setGamesErr(e.message||"Failed to load schedule"); }
     finally { setGamesLoad(false); }
   };
 
-  useEffect(() => { loadGames(gameDate); }, []);
+  // Load on first render only if no games yet
+  useEffect(() => {
+    if (!games.length && !gamesLoad) loadGames(gameDate);
+  }, []);
 
-  // Load props for ALL games when games list arrives
+  // Load all game props when games list first arrives
   useEffect(() => {
     if (!games.length) return;
+    if (allProps.length > 0) return; // already loaded
     const fetchAll = async () => {
       setLoading(true);
-      const newCache = {};
-      const allP = [];
+      const newCache = {...propCache};
+      const allP = [...allProps];
       for (const game of games) {
+        if (newCache[game.gameID]) {
+          // already cached — add to allP if not there
+          newCache[game.gameID].forEach(p => { if (!allP.find(x=>x.gameID===p.gameID&&x.playerName===p.playerName&&x.statType===p.statType)) allP.push(p); });
+          setLoadedGames(prev => new Set([...prev, game.gameID]));
+          continue;
+        }
         try {
           const r = await fetch(`${apiBase}/edge/odds?gameID=${encodeURIComponent(game.gameID)}`);
           if (!r.ok) continue;
           const data = await r.json();
-          const sorted = (Array.isArray(data) ? data : [])
-            .map(p => ({...p, gameID: game.gameID, away: game.away, home: game.home}))
-            .sort((a,b) => b.line - a.line);
-          newCache[game.gameID] = sorted;
-          allP.push(...sorted);
-          // Update incrementally so props appear as each game loads
+          const tagged = (Array.isArray(data) ? data : [])
+            .map(p => ({...p, gameID: game.gameID, away: game.away, home: game.home}));
+          newCache[game.gameID] = tagged;
+          allP.push(...tagged);
           setPropCache({...newCache});
           setAllProps([...allP].sort((a,b) => b.line - a.line));
           setLoadedGames(prev => new Set([...prev, game.gameID]));
         } catch {}
       }
+      setAllProps([...allP].sort((a,b) => b.line - a.line));
       setLoading(false);
     };
     fetchAll();
   }, [games]);
 
-  // Compute filtered props
   const filteredProps = allProps.filter(p => {
     if (gameFilter !== "All" && p.gameID !== gameFilter) return false;
     if (statFilter !== "All" && p.statType !== statFilter) return false;
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      if (!p.playerName.toLowerCase().includes(q)) return false;
-    }
+    if (search.trim() && !p.playerName.toLowerCase().includes(search.trim().toLowerCase())) return false;
     return true;
   });
 
@@ -2093,25 +2099,15 @@ function EdgeFinder({ apiBase, onAnalyze }) {
       {/* Header */}
       <div style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:12,
         padding:"1rem 1.25rem",marginBottom:"1rem"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-          marginBottom:"0.75rem"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.75rem"}}>
           <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#4a9eff",
-            fontSize:"0.72rem",letterSpacing:"0.2em",textTransform:"uppercase"}}>
-            ⚡ Edge Finder
-          </span>
-          {loading && (
-            <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",fontSize:"0.62rem"}}>
-              Loading {loadedCount}/{totalGames} games...
-            </span>
-          )}
-          {!loading && allProps.length > 0 && (
-            <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",fontSize:"0.62rem"}}>
-              {allProps.length} props · {totalGames} games
-            </span>
-          )}
+            fontSize:"0.72rem",letterSpacing:"0.2em",textTransform:"uppercase"}}>⚡ Edge Finder</span>
+          {loading && <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",fontSize:"0.62rem"}}>
+            Loading {loadedCount}/{totalGames} games...</span>}
+          {!loading && allProps.length > 0 && <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#3a6080",fontSize:"0.62rem"}}>
+            {allProps.length} props · {totalGames} games</span>}
         </div>
 
-        {/* Date picker */}
         <div style={{display:"flex",gap:"0.5rem",alignItems:"center"}}>
           <input type="date"
             value={`${gameDate.slice(0,4)}-${gameDate.slice(4,6)}-${gameDate.slice(6,8)}`}
@@ -2125,121 +2121,101 @@ function EdgeFinder({ apiBase, onAnalyze }) {
               borderRadius:6,color:"#4a9eff",fontFamily:"'Black Han Sans',sans-serif",
               fontSize:"0.8rem",cursor:"pointer"}}>↺</button>
         </div>
-
         {gamesLoad && <div style={{color:"#3a6080",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",marginTop:"0.5rem"}}>Loading schedule...</div>}
         {gamesErr  && <div style={{color:"#ff7043",fontFamily:"'JetBrains Mono',monospace",fontSize:"0.7rem",marginTop:"0.5rem"}}>{gamesErr}</div>}
       </div>
 
       {(allProps.length > 0 || (loadedCount === totalGames && totalGames > 0)) && (
         <div>
-          {/* No props message */}
-          {allProps.length === 0 && loadedCount === totalGames && totalGames > 0 && (
+          {allProps.length === 0 && (
             <div style={{textAlign:"center",padding:"2rem",color:"#2a4060",
               fontFamily:"'JetBrains Mono',monospace",fontSize:"0.75rem",
               background:"#080f1e",border:"1px solid #0e2040",borderRadius:12,marginBottom:"1rem"}}>
-              No props available for today's games yet.<br/>
-              <span style={{color:"#1e3050",fontSize:"0.65rem",marginTop:"0.5rem",display:"block"}}>
-                Books typically post props 2–3 hours before tip-off.
-              </span>
+              No props available yet — books typically post 2–3 hrs before tip-off.
             </div>
           )}
 
           {allProps.length > 0 && <>
-          {/* Player search */}
-          <input
-            placeholder="Search player..."
-            value={search}
-            onChange={e=>setSearch(e.target.value)}
-            style={{width:"100%",background:"#080f1e",border:"1px solid #1e3a5a",
-              borderRadius:8,color:"#e8f4fd",padding:"0.55rem 0.75rem",
-              fontFamily:"'JetBrains Mono',monospace",fontSize:"0.78rem",
-              outline:"none",marginBottom:"0.65rem",boxSizing:"border-box"}}
-          />
+            <input placeholder="Search player..." value={search}
+              onChange={e=>setSearch(e.target.value)}
+              style={{width:"100%",background:"#080f1e",border:"1px solid #1e3a5a",
+                borderRadius:8,color:"#e8f4fd",padding:"0.55rem 0.75rem",
+                fontFamily:"'JetBrains Mono',monospace",fontSize:"0.78rem",
+                outline:"none",marginBottom:"0.65rem",boxSizing:"border-box"}}
+            />
 
-          {/* Game filter */}
-          <div style={{display:"flex",gap:"0.3rem",flexWrap:"wrap",marginBottom:"0.5rem"}}>
-            <button onClick={()=>setGameFilter("All")}
-              style={{padding:"0.2rem 0.55rem",
-                background:gameFilter==="All"?"#4a9eff":"#0a1628",
-                color:gameFilter==="All"?"#050d1a":"#3a6080",
-                border:`1px solid ${gameFilter==="All"?"#4a9eff":"#1e3a5a"}`,
-                borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",cursor:"pointer"}}>
-              All Games
-            </button>
-            {games.map(g => (
-              <button key={g.gameID} onClick={()=>setGameFilter(g.gameID)}
-                style={{padding:"0.2rem 0.55rem",
-                  background:gameFilter===g.gameID?"#4a9eff":"#0a1628",
-                  color:gameFilter===g.gameID?"#050d1a":"#3a6080",
-                  border:`1px solid ${gameFilter===g.gameID?"#4a9eff":"#1e3a5a"}`,
-                  borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",cursor:"pointer",
-                  opacity: loadedGames.has(g.gameID) ? 1 : 0.4}}>
-                {g.away}@{g.home}
-                {!loadedGames.has(g.gameID) && <span style={{marginLeft:"0.3rem",opacity:0.5}}>...</span>}
-              </button>
-            ))}
-          </div>
-
-          {/* Stat filter */}
-          <div style={{display:"flex",gap:"0.3rem",flexWrap:"wrap",marginBottom:"0.75rem"}}>
-            {STAT_FILTERS.map(f=>(
-              <button key={f} onClick={()=>setStatFilter(f)}
-                style={{padding:"0.2rem 0.55rem",
-                  background:statFilter===f?"#4a9eff":"#0a1628",
-                  color:statFilter===f?"#050d1a":"#3a6080",
-                  border:`1px solid ${statFilter===f?"#4a9eff":"#1e3a5a"}`,
-                  borderRadius:5,fontFamily:"'JetBrains Mono',monospace",
-                  fontSize:"0.62rem",cursor:"pointer"}}>
-                {f}
-              </button>
-            ))}
-          </div>
-
-          {/* Results count */}
-          <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",
-            color:"#2a4060",marginBottom:"0.5rem"}}>
-            {filteredProps.length} prop{filteredProps.length!==1?"s":""}
-            {search&&` matching "${search}"`}
-          </div>
-
-          {/* Prop rows */}
-          {filteredProps.map((prop, idx) => {
-            // Find which game this prop belongs to
-            const game = games.find(g=>g.gameID===prop.gameID);
-            return (
-              <div key={idx}
-                onClick={() => onAnalyze(prop.playerName, prop.statType, prop.line, prop.position, game, prop)}
-                style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:8,
-                  padding:"0.6rem 0.85rem",marginBottom:"0.3rem",cursor:"pointer",
-                  display:"flex",justifyContent:"space-between",alignItems:"center",
-                  transition:"border-color 0.12s"}}
-                onMouseEnter={e=>e.currentTarget.style.borderColor="#1e3a5a"}
-                onMouseLeave={e=>e.currentTarget.style.borderColor="#0e2040"}>
-
-                <div>
-                  <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",
-                    fontSize:"0.88rem",letterSpacing:"0.03em"}}>{prop.playerName}</span>
-                  <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#2a4060",
-                    fontSize:"0.58rem",marginLeft:"0.5rem"}}>{prop.away}@{prop.home}</span>
-                </div>
-
-                <div style={{display:"flex",alignItems:"center",gap:"0.6rem"}}>
-                  <span style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:4,
-                    padding:"0.1rem 0.4rem",fontFamily:"'JetBrains Mono',monospace",
-                    fontSize:"0.58rem",color:"#4a9eff"}}>{prop.statType}</span>
-                  <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",
-                    fontSize:"1.1rem",minWidth:34,textAlign:"right"}}>{prop.line}</span>
-                </div>
-              </div>
-            );
-          })}
-
-          {filteredProps.length === 0 && !loading && (
-            <div style={{textAlign:"center",padding:"2rem",color:"#2a4060",
-              fontFamily:"'JetBrains Mono',monospace",fontSize:"0.75rem"}}>
-              No props match your filters
+            {/* Game filter */}
+            <div style={{display:"flex",gap:"0.3rem",flexWrap:"wrap",marginBottom:"0.5rem"}}>
+              {["All",...games.map(g=>g.gameID)].map(gid => {
+                const g = games.find(x=>x.gameID===gid);
+                const label = gid==="All" ? "All Games" : `${g?.away||""}@${g?.home||""}`;
+                return (
+                  <button key={gid} onClick={()=>setGameFilter(gid)}
+                    style={{padding:"0.2rem 0.55rem",
+                      background:gameFilter===gid?"#4a9eff":"#0a1628",
+                      color:gameFilter===gid?"#050d1a":"#3a6080",
+                      border:`1px solid ${gameFilter===gid?"#4a9eff":"#1e3a5a"}`,
+                      borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",cursor:"pointer",
+                      opacity:gid==="All"||loadedGames.has(gid)?1:0.4}}>
+                    {label}{gid!=="All"&&!loadedGames.has(gid)&&<span style={{marginLeft:"0.3rem",opacity:0.5}}>...</span>}
+                  </button>
+                );
+              })}
             </div>
-          )}
+
+            {/* Stat filter */}
+            <div style={{display:"flex",gap:"0.3rem",flexWrap:"wrap",marginBottom:"0.75rem"}}>
+              {STAT_FILTERS.map(f=>(
+                <button key={f} onClick={()=>setStatFilter(f)}
+                  style={{padding:"0.2rem 0.55rem",
+                    background:statFilter===f?"#4a9eff":"#0a1628",
+                    color:statFilter===f?"#050d1a":"#3a6080",
+                    border:`1px solid ${statFilter===f?"#4a9eff":"#1e3a5a"}`,
+                    borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",cursor:"pointer"}}>
+                  {f}
+                </button>
+              ))}
+            </div>
+
+            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",color:"#2a4060",marginBottom:"0.5rem"}}>
+              {filteredProps.length} prop{filteredProps.length!==1?"s":""}
+              {search&&` matching "${search}"`}
+            </div>
+
+            {filteredProps.map((prop, idx) => {
+              const game = games.find(g=>g.gameID===prop.gameID);
+              return (
+                <div key={idx}
+                  onClick={() => onAnalyze(prop.playerName, prop.statType, prop.line, prop.position, game, prop)}
+                  style={{background:"#080f1e",border:"1px solid #0e2040",borderRadius:8,
+                    padding:"0.6rem 0.85rem",marginBottom:"0.3rem",cursor:"pointer",
+                    display:"flex",justifyContent:"space-between",alignItems:"center",
+                    transition:"border-color 0.12s"}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor="#1e3a5a"}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor="#0e2040"}>
+                  <div>
+                    <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",
+                      fontSize:"0.88rem",letterSpacing:"0.03em"}}>{prop.playerName}</span>
+                    <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#2a4060",
+                      fontSize:"0.58rem",marginLeft:"0.5rem"}}>{prop.away}@{prop.home}</span>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:"0.6rem"}}>
+                    <span style={{background:"#0a1628",border:"1px solid #1e3a5a",borderRadius:4,
+                      padding:"0.1rem 0.4rem",fontFamily:"'JetBrains Mono',monospace",
+                      fontSize:"0.58rem",color:"#4a9eff"}}>{prop.statType}</span>
+                    <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",
+                      fontSize:"1.1rem",minWidth:34,textAlign:"right"}}>{prop.line}</span>
+                  </div>
+                </div>
+              );
+            })}
+
+            {filteredProps.length === 0 && !loading && (
+              <div style={{textAlign:"center",padding:"2rem",color:"#2a4060",
+                fontFamily:"'JetBrains Mono',monospace",fontSize:"0.75rem"}}>
+                No props match your filters
+              </div>
+            )}
           </>}
         </div>
       )}
@@ -2259,6 +2235,18 @@ const EMPTY_LOG={logs:[{min:"",stat:""},{min:"",stat:""},{min:"",stat:""}],h2hLo
 
 export default function App(){
   const [mainTab,setMainTab]=useState("lab");       // lab | edge | history
+  // Edge Finder persistent state (survives tab switches)
+  const [edgeDate,      setEdgeDate]      = useState(() => new Date().toISOString().slice(0,10).replace(/-/g,""));
+  const [edgeGames,     setEdgeGames]     = useState([]);
+  const [edgeAllProps,  setEdgeAllProps]  = useState([]);
+  const [edgePropCache, setEdgePropCache] = useState({});
+  const [edgeLoaded,    setEdgeLoaded]    = useState(new Set());
+  const [edgeLoading,   setEdgeLoading]   = useState(false);
+  const [edgeGamesLoad, setEdgeGamesLoad] = useState(false);
+  const [edgeGamesErr,  setEdgeGamesErr]  = useState("");
+  const [edgeGameFilter,setEdgeGameFilter]= useState("All");
+  const [edgeStatFilter,setEdgeStatFilter]= useState("All");
+  const [edgeSearch,    setEdgeSearch]    = useState("");
   const [inputMode,setInputMode]=useState("gamelog"); // always gamelog now
   const [form,setForm]=useState(EMPTY_FORM);
   const [logForm,setLogForm]=useState(EMPTY_LOG);
@@ -3258,7 +3246,20 @@ export default function App(){
 
           {/* ══ EDGE FINDER ══ */}
           {mainTab==="edge"&&(
-            <EdgeFinder apiBase={API_BASE} onAnalyze={async (player, statType, line, position, game, prop={}) => {
+            <EdgeFinder
+              apiBase={API_BASE}
+              gameDate={edgeDate} setGameDate={setEdgeDate}
+              games={edgeGames} setGames={setEdgeGames}
+              allProps={edgeAllProps} setAllProps={setEdgeAllProps}
+              propCache={edgePropCache} setPropCache={setEdgePropCache}
+              loadedGames={edgeLoaded} setLoadedGames={setEdgeLoaded}
+              loading={edgeLoading} setLoading={setEdgeLoading}
+              gamesLoad={edgeGamesLoad} setGamesLoad={setEdgeGamesLoad}
+              gamesErr={edgeGamesErr} setGamesErr={setEdgeGamesErr}
+              gameFilter={edgeGameFilter} setGameFilter={setEdgeGameFilter}
+              statFilter={edgeStatFilter} setStatFilter={setEdgeStatFilter}
+              search={edgeSearch} setSearch={setEdgeSearch}
+              onAnalyze={async (player, statType, line, position, game, prop={}) => {
               // Derive opponent — the team the player is NOT on
               let opp = "";
               if (game?.away && game?.home) {
@@ -3300,15 +3301,16 @@ export default function App(){
 
               if (!matchId) return;
 
-              // 5. Set nba hook state
+              // 5. Set nba hook state — opponent MUST be set before loadData
+              //    so the backend includes H2H logs in the response
               nba.setPlayerId(matchId);
               nba.setPlayerName(matchName);
-              nba.setOpponent(opp);
               nba.setLoaded(false);
               nba.setError("");
+              nba.setOpponent(opp);  // set opponent first so loadData uses it
 
-              // 6. Load via same handleNBALoad pipeline
-              const data = await nba.loadData(matchId, matchName, statType);
+              // 6. Load via same handleNBALoad pipeline (pass opp explicitly)
+              const data = await nba.loadData(matchId, matchName, statType, opp);
               if (!data) return;
 
               const limit  = parseInt(gameLimit) || 0;
