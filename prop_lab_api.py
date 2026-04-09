@@ -162,27 +162,26 @@ def parse_min(v) -> float:
 def parse_margin(game_result: str) -> Optional[int]:
     """
     Parse score margin from bbref game_result field.
-    e.g. 'W (+8)' → +8  (won by 8)
-         'L (-15)' → -15 (lost by 15)
+    Format: 'W, 130-120' → +10  (won by 10)
+            'L, 96-139'  → -43  (lost by 43)
+            'L, 128-134' → -6   (lost by 6)
     Positive = player's team won by that amount.
     Negative = player's team lost by that amount.
     """
     if not game_result:
         return None
-    # Find last signed integer in parens, e.g. (+8) or (-15)
-    matches = re.findall(r'\(([+-]?\d+)\)', game_result)
-    if matches:
-        try:
-            val = int(matches[-1])
-            # If result starts with W, margin is positive; L, negative
-            if game_result.strip().startswith('L') and val > 0:
-                val = -val
-            elif game_result.strip().startswith('W') and val < 0:
-                val = abs(val)
-            return val
-        except ValueError:
-            pass
-    return None
+    try:
+        # Format: "W, 130-120" or "L, 96-139"
+        parts = game_result.strip().split(",")
+        outcome = parts[0].strip()  # "W" or "L"
+        scores  = parts[1].strip()  # "130-120"
+        s1, s2  = scores.split("-")
+        team_score = int(s1.strip())
+        opp_score  = int(s2.strip())
+        margin = team_score - opp_score  # positive if won, negative if lost
+        return margin
+    except Exception:
+        return None
 
 def window_stats(logs, n):
     w = logs[:n]
@@ -1180,7 +1179,8 @@ async def clear_edge_cache():
     _odds_cache.clear()
     _roster_cache.clear()
     _tank01_id_cache.clear()
-    return {"cleared": True}
+    _gamelog_cache.clear()
+    return {"cleared": True, "note": "gamelog cache cleared — margins will re-parse on next load"}
 
 
 @app.get("/edge/positions")
