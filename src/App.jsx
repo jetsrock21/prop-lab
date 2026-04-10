@@ -2040,6 +2040,7 @@ function EdgeFinder({
   edgeScores, setEdgeScores,
   edgeScoring, setEdgeScoring,
   edgeSortScore, setEdgeSortScore,
+  onScoreGame,
 }) {
   const STAT_FILTERS = ["All","Points","Rebounds","Assists","3-Pointers","PRA","PR","PA","RA","Blocks","Steals"];
 
@@ -2096,78 +2097,61 @@ function EdgeFinder({
     fetchAll();
   }, [games]);
 
-  // Score all props after they load — one bbref fetch per player
-  useEffect(() => {
-    if (!allProps.length || edgeScoring) return;
-    const unscored = allProps.filter(p => !edgeScores[`${p.playerName}|${p.statType}`]);
-    if (!unscored.length) return;
+  // Manual scoring function — scores players for a specific game
+  const scoreGame = async (gameID) => {
+    if (edgeScoring) return;
+    const gamePlayers = [...new Set(
+      allProps.filter(p => p.gameID === gameID).map(p => p.playerName)
+    )];
+    if (!gamePlayers.length) return;
 
-    const runScoring = async () => {
-      setEdgeScoring(true);
-      // Group by player — fetch logs once per player
-      const players = [...new Set(unscored.map(p => p.playerName))];
-      for (const playerName of players) {
-        try {
-          // Find player ID
-          const lastName = normalizeName(playerName).split(" ").slice(-1)[0];
-          const sr = await fetch(`${apiBase}/players/search?q=${encodeURIComponent(lastName)}`);
-          const list = sr.ok ? await sr.json() : [];
-          const normTarget = normalizeName(playerName).toLowerCase();
-          const match = list.find(p=>normalizeName(p.full_name).toLowerCase()===normTarget)
-                     || list.find(p=>normalizeName(p.full_name).toLowerCase().includes(normTarget));
-          if (!match) continue;
+    setEdgeScoring(true);
+    for (const playerName of gamePlayers) {
+      // Skip if already scored
+      const playerProps = allProps.filter(p => p.playerName === playerName);
+      const alreadyScored = playerProps.every(p => edgeScores[`${p.playerName}|${p.statType}`]);
+      if (alreadyScored) continue;
 
-          // Get their props to know which stat types to score
-          const playerProps = allProps.filter(p => p.playerName === playerName);
-          const statTypes   = [...new Set(playerProps.map(p => p.statType))];
+      try {
+        const lastName = normalizeName(playerName).split(" ").slice(-1)[0];
+        const sr = await fetch(`${apiBase}/players/search?q=${encodeURIComponent(lastName)}`);
+        const list = sr.ok ? await sr.json() : [];
+        const normTarget = normalizeName(playerName).toLowerCase();
+        const match = list.find(p=>normalizeName(p.full_name).toLowerCase()===normTarget)
+                   || list.find(p=>normalizeName(p.full_name).toLowerCase().includes(normTarget));
+        if (!match) continue;
 
-          // Fetch logs once — use first stat type (logs are same, stat changes)
-          const primaryStat = statTypes.includes("Points") ? "Points" : statTypes[0];
-          const lr = await fetch(`${apiBase}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(primaryStat)}&season=2025-26`);
-          if (!lr.ok) continue;
-          const logData = await lr.json();
-          const rawLogs = logData.recent_logs || [];
-          if (!rawLogs.length) continue;
+        const statTypes = [...new Set(playerProps.map(p => p.statType))];
+        const newScores = {};
 
-          // Score each stat type for this player
-          const newScores = {};
-          for (const statType of statTypes) {
-            // Re-fetch logs for this stat type (needed for correct stat values)
-            let statLogs = rawLogs;
-            if (statType !== primaryStat) {
-              try {
-                const sr2 = await fetch(`${apiBase}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(statType)}&season=2025-26`);
-                if (sr2.ok) { const d2 = await sr2.json(); statLogs = d2.recent_logs || rawLogs; }
-              } catch {}
-            }
-
-            const validLogs = statLogs.map(r=>({min:parseFloat(r.min)||0,stat:parseFloat(r.stat)||0})).filter(r=>r.min>0);
+        for (const statType of statTypes) {
+          try {
+            const lr = await fetch(`${apiBase}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(statType)}&season=2025-26`);
+            if (!lr.ok) continue;
+            const logData = await lr.json();
+            const validLogs = (logData.recent_logs||[]).map(r=>({min:parseFloat(r.min)||0,stat:parseFloat(r.stat)||0})).filter(r=>r.min>0);
             if (!validLogs.length) continue;
 
             const prop = playerProps.find(p=>p.statType===statType);
             if (!prop) continue;
 
-            try {
-              const model = buildGameLogModel({logs:validLogs, h2hLogs:[], statType, projMin:0, useRecency:true, decayStrength:0.12});
-              const sim   = runMonteCarlo({meanRate:model.blendedRate, sdRate:model.sdRate, meanMin:model.pMin, sdMin:model.sdMin||model.pMin*0.12, projMin:model.pMin, matchupFactor:1, iters:3000});
-              const ss    = calcSimStats(sim.outcomes, prop.line);
-              const proj  = +(model.projection).toFixed(1);
-              const diffPct = prop.line > 0 ? ((proj-prop.line)/prop.line)*100 : 0;
-              const score = getEdgeScore({diffPct, overPct:ss.overPct, boomPct:ss.boomPct||0, bustPct:ss.bustPct||0, minuteStability:model.minuteStability??0.7, statType});
-              newScores[`${playerName}|${statType}`] = {score, proj, diffPct:+diffPct.toFixed(1), overPct:+ss.overPct.toFixed(1)};
-            } catch {}
-          }
+            const model = buildGameLogModel({logs:validLogs, h2hLogs:[], statType, projMin:0, useRecency:true, decayStrength:0.12});
+            const sim   = runMonteCarlo({meanRate:model.blendedRate, sdRate:model.sdRate, meanMin:model.pMin, sdMin:model.sdMin||model.pMin*0.12, projMin:model.pMin, matchupFactor:1, iters:3000});
+            const ss    = calcSimStats(sim.outcomes, prop.line);
+            const proj  = +(model.projection).toFixed(1);
+            const diffPct = prop.line > 0 ? ((proj-prop.line)/prop.line)*100 : 0;
+            const score = getEdgeScore({diffPct, overPct:ss.overPct, boomPct:ss.boomPct||0, bustPct:ss.bustPct||0, minuteStability:model.minuteStability??0.7, statType});
+            newScores[`${playerName}|${statType}`] = {score, proj, diffPct:+diffPct.toFixed(1), overPct:+ss.overPct.toFixed(1)};
+          } catch {}
+        }
 
-          setEdgeScores(prev => ({...prev, ...newScores}));
-        } catch {}
-        // Small delay between players to avoid hammering bbref
-        await new Promise(r => setTimeout(r, 400));
-      }
-      setEdgeScoring(false);
-    };
-
-    runScoring();
-  }, [allProps]);
+        setEdgeScores(prev => ({...prev, ...newScores}));
+      } catch {}
+      // 1.5s between players to respect bbref rate limits
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    setEdgeScoring(false);
+  };
 
   const filteredProps = allProps.filter(p => {
     if (gameFilter !== "All" && p.gameID !== gameFilter) return false;
@@ -2245,15 +2229,36 @@ function EdgeFinder({
                 const g = games.find(x=>x.gameID===gid);
                 const label = gid==="All" ? "All Games" : `${g?.away||""}@${g?.home||""}`;
                 return (
-                  <button key={gid} onClick={()=>setGameFilter(gid)}
-                    style={{padding:"0.2rem 0.55rem",
-                      background:gameFilter===gid?"#4a9eff":"#0a1628",
-                      color:gameFilter===gid?"#050d1a":"#3a6080",
-                      border:`1px solid ${gameFilter===gid?"#4a9eff":"#1e3a5a"}`,
-                      borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",cursor:"pointer",
-                      opacity:gid==="All"||loadedGames.has(gid)?1:0.4}}>
-                    {label}{gid!=="All"&&!loadedGames.has(gid)&&<span style={{marginLeft:"0.3rem",opacity:0.5}}>...</span>}
-                  </button>
+                  <div key={gid} style={{display:"flex",alignItems:"center",gap:"0.2rem"}}>
+                    <button onClick={()=>setGameFilter(gid)}
+                      style={{padding:"0.2rem 0.55rem",
+                        background:gameFilter===gid?"#4a9eff":"#0a1628",
+                        color:gameFilter===gid?"#050d1a":"#3a6080",
+                        border:`1px solid ${gameFilter===gid?"#4a9eff":"#1e3a5a"}`,
+                        borderRadius:5,fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",cursor:"pointer",
+                        opacity:gid==="All"||loadedGames.has(gid)?1:0.4}}>
+                      {label}{gid!=="All"&&!loadedGames.has(gid)&&<span style={{marginLeft:"0.3rem",opacity:0.5}}>...</span>}
+                    </button>
+                    {gid!=="All"&&loadedGames.has(gid)&&(()=>{
+                      const gamePlayers = [...new Set(allProps.filter(p=>p.gameID===gid).map(p=>p.playerName))];
+                      const scoredPlayers = gamePlayers.filter(pn=>
+                        allProps.filter(p=>p.gameID===gid&&p.playerName===pn)
+                          .some(p=>edgeScores[`${p.playerName}|${p.statType}`])
+                      );
+                      const allScored = scoredPlayers.length === gamePlayers.length && gamePlayers.length > 0;
+                      if (allScored) return <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.5rem",color:"#00e676"}}>✓</span>;
+                      if (edgeScoring && gameFilter===gid) return <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.5rem",color:"#3a6080"}}>{scoredPlayers.length}/{gamePlayers.length}</span>;
+                      return (
+                        <button onClick={()=>{ setGameFilter(gid); onScoreGame(gid); }}
+                          style={{padding:"0.1rem 0.35rem",background:"#0a1a0a",
+                            border:"1px solid #00e67640",borderRadius:4,
+                            color:"#00e676",fontFamily:"'JetBrains Mono',monospace",
+                            fontSize:"0.5rem",cursor:"pointer"}}>
+                          score
+                        </button>
+                      );
+                    })()}
+                  </div>
                 );
               })}
             </div>
@@ -2280,12 +2285,7 @@ function EdgeFinder({
               <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
                 {edgeScoring&&(
                   <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",color:"#3a6080"}}>
-                    scoring {scoredCount}/{totalScorable}...
-                  </span>
-                )}
-                {!edgeScoring&&scoredCount>0&&(
-                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",color:"#2a4060"}}>
-                    {scoredCount} scored
+                    scoring...
                   </span>
                 )}
                 <button onClick={()=>setEdgeSortScore(s=>!s)}
@@ -3477,6 +3477,50 @@ export default function App(){
               edgeScores={edgeScores} setEdgeScores={setEdgeScores}
               edgeScoring={edgeScoring} setEdgeScoring={setEdgeScoring}
               edgeSortScore={edgeSortScore} setEdgeSortScore={setEdgeSortScore}
+              onScoreGame={async (gameID) => {
+                if (edgeScoring) return;
+                setEdgeScoring(true);
+                const gamePlayers = [...new Set(
+                  edgeAllProps.filter(p=>p.gameID===gameID).map(p=>p.playerName)
+                )];
+                for (const playerName of gamePlayers) {
+                  const playerProps = edgeAllProps.filter(p=>p.playerName===playerName);
+                  const alreadyScored = playerProps.every(p=>edgeScores[`${p.playerName}|${p.statType}`]);
+                  if (alreadyScored) continue;
+                  try {
+                    const lastName = normalizeName(playerName).split(" ").slice(-1)[0];
+                    const sr = await fetch(`${API_BASE}/players/search?q=${encodeURIComponent(lastName)}`);
+                    const list = sr.ok ? await sr.json() : [];
+                    const normTarget = normalizeName(playerName).toLowerCase();
+                    const match = list.find(p=>normalizeName(p.full_name).toLowerCase()===normTarget)
+                               || list.find(p=>normalizeName(p.full_name).toLowerCase().includes(normTarget));
+                    if (!match) continue;
+                    const statTypes = [...new Set(playerProps.map(p=>p.statType))];
+                    const newScores = {};
+                    for (const statType of statTypes) {
+                      try {
+                        const lr = await fetch(`${API_BASE}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(statType)}&season=2025-26`);
+                        if (!lr.ok) continue;
+                        const logData = await lr.json();
+                        const validLogs = (logData.recent_logs||[]).map(r=>({min:parseFloat(r.min)||0,stat:parseFloat(r.stat)||0})).filter(r=>r.min>0);
+                        if (!validLogs.length) continue;
+                        const prop = playerProps.find(p=>p.statType===statType);
+                        if (!prop) continue;
+                        const model = buildGameLogModel({logs:validLogs,h2hLogs:[],statType,projMin:0,useRecency:true,decayStrength:0.12});
+                        const sim   = runMonteCarlo({meanRate:model.blendedRate,sdRate:model.sdRate,meanMin:model.pMin,sdMin:model.sdMin||model.pMin*0.12,projMin:model.pMin,matchupFactor:1,iters:3000});
+                        const ss    = calcSimStats(sim.outcomes,prop.line);
+                        const proj  = +(model.projection).toFixed(1);
+                        const diffPct = prop.line>0?((proj-prop.line)/prop.line)*100:0;
+                        const score = getEdgeScore({diffPct,overPct:ss.overPct,boomPct:ss.boomPct||0,bustPct:ss.bustPct||0,minuteStability:model.minuteStability??0.7,statType});
+                        newScores[`${playerName}|${statType}`] = {score,proj,diffPct:+diffPct.toFixed(1),overPct:+ss.overPct.toFixed(1)};
+                      } catch {}
+                    }
+                    setEdgeScores(prev=>({...prev,...newScores}));
+                  } catch {}
+                  await new Promise(r=>setTimeout(r,1500));
+                }
+                setEdgeScoring(false);
+              }}
               onAnalyze={async (player, statType, line, position, game, prop={}) => {
               // Derive opponent — the team the player is NOT on
               let opp = "";
