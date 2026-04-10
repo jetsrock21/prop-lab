@@ -1,5 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
+// Normalize accented characters for search: Jokić → Jokic
+function normalizeName(s) {
+  return (s||"").normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+// Tank01 → bbref team abbreviation mapping
+const TANK01_TO_BBREF = {"CHA":"CHO","BKN":"BRK","GS":"GSW","NO":"NOP","NY":"NYK","SA":"SAS"};
+const BBREF_TO_TANK01 = Object.fromEntries(Object.entries(TANK01_TO_BBREF).map(([k,v])=>[v,k]));
+
 const STAT_TYPES = ["Points","Rebounds","Assists","3-Pointers","Blocks","Steals","PRA","PR","PA","RA"];
 const SIM_PRESETS = [1000,5000,10000,25000,50000];
 const DEFAULT_ITERS = 10000;
@@ -2100,11 +2109,12 @@ function EdgeFinder({
       for (const playerName of players) {
         try {
           // Find player ID
-          const lastName = playerName.split(" ").slice(-1)[0];
+          const lastName = normalizeName(playerName).split(" ").slice(-1)[0];
           const sr = await fetch(`${apiBase}/players/search?q=${encodeURIComponent(lastName)}`);
           const list = sr.ok ? await sr.json() : [];
-          const match = list.find(p=>p.full_name.toLowerCase()===playerName.toLowerCase())
-                     || list.find(p=>p.full_name.toLowerCase().includes(playerName.toLowerCase()));
+          const normTarget = normalizeName(playerName).toLowerCase();
+          const match = list.find(p=>normalizeName(p.full_name).toLowerCase()===normTarget)
+                     || list.find(p=>normalizeName(p.full_name).toLowerCase().includes(normTarget));
           if (!match) continue;
 
           // Get their props to know which stat types to score
