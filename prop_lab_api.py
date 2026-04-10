@@ -150,6 +150,32 @@ def get_all_players():
     ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+# Team abbreviation mapping: Tank01/NBA → bbref
+# Tank01 uses NBA standard abbrs, bbref uses different ones for some teams
+TANK01_TO_BBREF_TEAM = {
+    "CHA": "CHO",   # Charlotte Hornets
+    "BKN": "BRK",   # Brooklyn Nets
+    "GS":  "GSW",   # Golden State Warriors
+    "NO":  "NOP",   # New Orleans Pelicans
+    "NY":  "NYK",   # New York Knicks
+    "SA":  "SAS",   # San Antonio Spurs
+    "PHO": "PHX",   # Phoenix Suns (bbref uses PHO actually, but just in case)
+    "UTAH":"UTA",   # Utah Jazz
+}
+
+# Reverse mapping: bbref → Tank01
+BBREF_TO_TANK01_TEAM = {v: k for k, v in TANK01_TO_BBREF_TEAM.items()}
+
+
+def normalize_name(name: str) -> str:
+    """Remove accents/diacritics for search matching. Jokić → Jokic, Šengün → Sengun."""
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFD", name)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
 def parse_min(v) -> float:
     if not v: return 0.0
     s = str(v).strip()
@@ -393,10 +419,10 @@ async def debug_page():
 @app.get("/players/search")
 async def search_players(q: str = Query(..., min_length=2)):
     players = await get_player_list()
-    q_lower = q.lower().strip()
+    q_lower  = normalize_name(q.lower().strip())
     matches = [
         {"id": p["id"], "full_name": p["full_name"], "is_active": p.get("is_active", True)}
-        for p in players if q_lower in p["full_name"].lower()
+        for p in players if q_lower in normalize_name(p["full_name"].lower())
     ]
     matches.sort(key=lambda x: (not x["is_active"], x["full_name"]))
     return matches[:25]
@@ -474,13 +500,16 @@ async def get_gamelogs(
             "margin":   margin,   # +N = won by N, -N = lost by N, None = unknown
         })
 
-    # H2H filter
+    # H2H filter — normalize opponent abbr (Tank01 vs bbref differences)
     h2h = []
     if opponent:
         opp_up = opponent.upper().strip()
+        # Map Tank01 abbr to bbref abbr if needed
+        opp_bbref = TANK01_TO_BBREF_TEAM.get(opp_up, opp_up)
+        # Also check reverse (if bbref abbr passed in)
         h2h = [
             {"date": g["date"], "min": g["min"], "stat": g["stat"]}
-            for g in logs if g["opponent"].upper() == opp_up
+            for g in logs if g["opponent"].upper() in {opp_up, opp_bbref}
         ]
 
     def to_pl(gl): return [{
