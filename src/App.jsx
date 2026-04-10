@@ -2028,12 +2028,15 @@ function EdgeFinder({
   gameFilter, setGameFilter,
   statFilter, setStatFilter,
   search, setSearch,
+  edgeScores, setEdgeScores,
+  edgeScoring, setEdgeScoring,
+  edgeSortScore, setEdgeSortScore,
 }) {
   const STAT_FILTERS = ["All","Points","Rebounds","Assists","3-Pointers","PRA","PR","PA","RA","Blocks","Steals"];
 
   const loadGames = async (date) => {
     setGamesLoad(true); setGamesErr(""); setGames([]);
-    setAllProps([]); setPropCache({}); setLoadedGames(new Set());
+    setAllProps([]); setPropCache({}); setLoadedGames(new Set()); setEdgeScores({}); setEdgeScoring(false);
     setGameFilter("All");
     try {
       const r = await fetch(`${apiBase}/edge/schedule?gameDate=${date}`);
@@ -2084,12 +2087,94 @@ function EdgeFinder({
     fetchAll();
   }, [games]);
 
+  // Score all props after they load — one bbref fetch per player
+  useEffect(() => {
+    if (!allProps.length || edgeScoring) return;
+    const unscored = allProps.filter(p => !edgeScores[`${p.playerName}|${p.statType}`]);
+    if (!unscored.length) return;
+
+    const runScoring = async () => {
+      setEdgeScoring(true);
+      // Group by player — fetch logs once per player
+      const players = [...new Set(unscored.map(p => p.playerName))];
+      for (const playerName of players) {
+        try {
+          // Find player ID
+          const lastName = playerName.split(" ").slice(-1)[0];
+          const sr = await fetch(`${apiBase}/players/search?q=${encodeURIComponent(lastName)}`);
+          const list = sr.ok ? await sr.json() : [];
+          const match = list.find(p=>p.full_name.toLowerCase()===playerName.toLowerCase())
+                     || list.find(p=>p.full_name.toLowerCase().includes(playerName.toLowerCase()));
+          if (!match) continue;
+
+          // Get their props to know which stat types to score
+          const playerProps = allProps.filter(p => p.playerName === playerName);
+          const statTypes   = [...new Set(playerProps.map(p => p.statType))];
+
+          // Fetch logs once — use first stat type (logs are same, stat changes)
+          const primaryStat = statTypes.includes("Points") ? "Points" : statTypes[0];
+          const lr = await fetch(`${apiBase}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(primaryStat)}&season=2025-26`);
+          if (!lr.ok) continue;
+          const logData = await lr.json();
+          const rawLogs = logData.recent_logs || [];
+          if (!rawLogs.length) continue;
+
+          // Score each stat type for this player
+          const newScores = {};
+          for (const statType of statTypes) {
+            // Re-fetch logs for this stat type (needed for correct stat values)
+            let statLogs = rawLogs;
+            if (statType !== primaryStat) {
+              try {
+                const sr2 = await fetch(`${apiBase}/players/${match.id}/gamelogs?stat_type=${encodeURIComponent(statType)}&season=2025-26`);
+                if (sr2.ok) { const d2 = await sr2.json(); statLogs = d2.recent_logs || rawLogs; }
+              } catch {}
+            }
+
+            const validLogs = statLogs.map(r=>({min:parseFloat(r.min)||0,stat:parseFloat(r.stat)||0})).filter(r=>r.min>0);
+            if (!validLogs.length) continue;
+
+            const prop = playerProps.find(p=>p.statType===statType);
+            if (!prop) continue;
+
+            try {
+              const model = buildGameLogModel({logs:validLogs, h2hLogs:[], statType, projMin:0, useRecency:true, decayStrength:0.12});
+              const sim   = runMonteCarlo({meanRate:model.blendedRate, sdRate:model.sdRate, meanMin:model.pMin, sdMin:model.sdMin||model.pMin*0.12, projMin:model.pMin, matchupFactor:1, iters:3000});
+              const ss    = calcSimStats(sim.outcomes, prop.line);
+              const proj  = +(model.projection).toFixed(1);
+              const diffPct = prop.line > 0 ? ((proj-prop.line)/prop.line)*100 : 0;
+              const score = getEdgeScore({diffPct, overPct:ss.overPct, boomPct:ss.boomPct||0, bustPct:ss.bustPct||0, minuteStability:model.minuteStability??0.7, statType});
+              newScores[`${playerName}|${statType}`] = {score, proj, diffPct:+diffPct.toFixed(1), overPct:+ss.overPct.toFixed(1)};
+            } catch {}
+          }
+
+          setEdgeScores(prev => ({...prev, ...newScores}));
+        } catch {}
+        // Small delay between players to avoid hammering bbref
+        await new Promise(r => setTimeout(r, 400));
+      }
+      setEdgeScoring(false);
+    };
+
+    runScoring();
+  }, [allProps]);
+
   const filteredProps = allProps.filter(p => {
     if (gameFilter !== "All" && p.gameID !== gameFilter) return false;
     if (statFilter !== "All" && p.statType !== statFilter) return false;
     if (search.trim() && !p.playerName.toLowerCase().includes(search.trim().toLowerCase())) return false;
     return true;
+  }).sort((a,b) => {
+    if (edgeSortScore) {
+      const sa = edgeScores[`${a.playerName}|${a.statType}`]?.score ?? -1;
+      const sb = edgeScores[`${b.playerName}|${b.statType}`]?.score ?? -1;
+      return sb - sa; // highest score first
+    }
+    return b.line - a.line; // default: line descending
   });
+
+  const scoredCount = Object.keys(edgeScores).length;
+  const totalScorable = [...new Set(allProps.map(p=>`${p.playerName}|${p.statType}`))].length;
 
   const loadedCount = loadedGames.size;
   const totalGames  = games.length;
@@ -2177,9 +2262,32 @@ function EdgeFinder({
               ))}
             </div>
 
-            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",color:"#2a4060",marginBottom:"0.5rem"}}>
-              {filteredProps.length} prop{filteredProps.length!==1?"s":""}
-              {search&&` matching "${search}"`}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.5rem"}}>
+              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.62rem",color:"#2a4060"}}>
+                {filteredProps.length} prop{filteredProps.length!==1?"s":""}
+                {search&&` matching "${search}"`}
+              </span>
+              <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
+                {edgeScoring&&(
+                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",color:"#3a6080"}}>
+                    scoring {scoredCount}/{totalScorable}...
+                  </span>
+                )}
+                {!edgeScoring&&scoredCount>0&&(
+                  <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",color:"#2a4060"}}>
+                    {scoredCount} scored
+                  </span>
+                )}
+                <button onClick={()=>setEdgeSortScore(s=>!s)}
+                  style={{padding:"0.2rem 0.6rem",
+                    background:edgeSortScore?"#4a9eff":"#0a1628",
+                    color:edgeSortScore?"#050d1a":"#3a6080",
+                    border:`1px solid ${edgeSortScore?"#4a9eff":"#1e3a5a"}`,
+                    borderRadius:5,fontFamily:"'JetBrains Mono',monospace",
+                    fontSize:"0.62rem",cursor:"pointer"}}>
+                  {edgeSortScore?"📊 By Score":"📊 Sort by Score"}
+                </button>
+              </div>
             </div>
 
             {filteredProps.map((prop, idx) => {
@@ -2199,12 +2307,12 @@ function EdgeFinder({
                     <span style={{fontFamily:"'JetBrains Mono',monospace",color:"#2a4060",
                       fontSize:"0.58rem",marginLeft:"0.5rem"}}>{prop.away}@{prop.home}</span>
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:"0.6rem"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
                     {prop.spread!=null&&Math.abs(prop.spread)>=5&&(
-                      <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.55rem",
+                      <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.52rem",
                         color:Math.abs(prop.spread)>=10?"#ff7043":"#ffee58",
                         background:Math.abs(prop.spread)>=10?"#1a0800":"#1a1600",
-                        padding:"0.1rem 0.35rem",borderRadius:3}}>
+                        padding:"0.1rem 0.3rem",borderRadius:3}}>
                         {prop.spread>0?"+":""}{prop.spread}
                       </span>
                     )}
@@ -2212,7 +2320,18 @@ function EdgeFinder({
                       padding:"0.1rem 0.4rem",fontFamily:"'JetBrains Mono',monospace",
                       fontSize:"0.58rem",color:"#4a9eff"}}>{prop.statType}</span>
                     <span style={{fontFamily:"'Black Han Sans',sans-serif",color:"#e8f4fd",
-                      fontSize:"1.1rem",minWidth:34,textAlign:"right"}}>{prop.line}</span>
+                      fontSize:"1.1rem",minWidth:32,textAlign:"right"}}>{prop.line}</span>
+                    {(()=>{
+                      const sc = edgeScores[`${prop.playerName}|${prop.statType}`];
+                      if (!sc) return <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.52rem",color:"#1e3a5a",minWidth:28,textAlign:"right"}}>···</span>;
+                      const col = sc.score>=72?"#00e676":sc.score>=58?"#69f0ae":sc.score<=28?"#ff5252":sc.score<=42?"#ff7043":"#ffee58";
+                      return (
+                        <div style={{textAlign:"center",minWidth:32}}>
+                          <div style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:"1rem",color:col,lineHeight:1}}>{sc.score}</div>
+                          <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:"0.45rem",color:col,opacity:0.7}}>{sc.diffPct>=0?"+":""}{sc.diffPct}%</div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               );
@@ -2255,6 +2374,9 @@ export default function App(){
   const [edgeGameFilter,setEdgeGameFilter]= useState("All");
   const [edgeStatFilter,setEdgeStatFilter]= useState("All");
   const [edgeSearch,    setEdgeSearch]    = useState("");
+  const [edgeScores,    setEdgeScores]    = useState({});  // "playerName|statType" → {score, proj, diffPct}
+  const [edgeScoring,   setEdgeScoring]   = useState(false);
+  const [edgeSortScore, setEdgeSortScore] = useState(false);
   const [inputMode,setInputMode]=useState("gamelog"); // always gamelog now
   const [form,setForm]=useState(EMPTY_FORM);
   const [logForm,setLogForm]=useState(EMPTY_LOG);
@@ -3342,6 +3464,9 @@ export default function App(){
               gameFilter={edgeGameFilter} setGameFilter={setEdgeGameFilter}
               statFilter={edgeStatFilter} setStatFilter={setEdgeStatFilter}
               search={edgeSearch} setSearch={setEdgeSearch}
+              edgeScores={edgeScores} setEdgeScores={setEdgeScores}
+              edgeScoring={edgeScoring} setEdgeScoring={setEdgeScoring}
+              edgeSortScore={edgeSortScore} setEdgeSortScore={setEdgeSortScore}
               onAnalyze={async (player, statType, line, position, game, prop={}) => {
               // Derive opponent — the team the player is NOT on
               let opp = "";
