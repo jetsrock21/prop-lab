@@ -1849,6 +1849,35 @@ const STAT_TO_DVP = {
   "RA":         ["raAvg",   "l5RaAvg",   "l10RaAvg",   "l20RaAvg"],
 };
 
+// Standalone DvP fetch for edge scoring (outside the hook)
+const _dvpSheetCache = {}; // position → teams array
+async function fetchDvpForScoring(position) {
+  if (_dvpSheetCache[position]) return _dvpSheetCache[position];
+  try {
+    const url = `${SHEET_BASE}${encodeURIComponent(position)}`;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const teams = parseCsv(await r.text());
+    if (teams.length) _dvpSheetCache[position] = teams;
+    return teams.length ? teams : null;
+  } catch { return null; }
+}
+
+function getEdgeDvpMatchup(teams, opponent, statType) {
+  if (!teams || !opponent) return {l5:null,l10:null,l20:null,leagueAvg:null};
+  const opp = opponent.trim().toUpperCase();
+  const team = teams.find(t=>(t.teamAbbr||"").toUpperCase()===opp||(t.teamName||"").toUpperCase().includes(opp));
+  if (!team) return {l5:null,l10:null,l20:null,leagueAvg:null};
+  const fields = STAT_TO_DVP[statType];
+  if (!fields) return {l5:null,l10:null,l20:null,leagueAvg:null};
+  const [seasonF,l5F,l10F,l20F] = fields;
+  const toV = v => parseFloat(v)>0 ? parseFloat(v) : null;
+  // League avg
+  const vals = teams.map(t=>parseFloat(t[seasonF])).filter(v=>v>0&&!isNaN(v));
+  const leagueAvg = vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+  return { l5:toV(team[l5F]), l10:toV(team[l10F]), l20:toV(team[l20F]), leagueAvg };
+}
+
 function useDvP() {
   const [position,   setPosition]   = useState("PG");
   const [dvpData,    setDvpData]    = useState(null);   // full API response teams array
@@ -2135,8 +2164,24 @@ function EdgeFinder({
             const prop = playerProps.find(p=>p.statType===statType);
             if (!prop) continue;
 
-            const model = buildGameLogModel({logs:validLogs, h2hLogs:[], statType, projMin:0, useRecency:true, decayStrength:0.12});
-            const sim   = runMonteCarlo({meanRate:model.blendedRate, sdRate:model.sdRate, meanMin:model.pMin, sdMin:model.sdMin||model.pMin*0.12, projMin:model.pMin, matchupFactor:1, iters:3000});
+            // Fetch DvP matchup for this player's position + opponent
+            const position = prop.position || "PG";
+            const opponent = TANK01_TO_BBREF[prop.team?.toUpperCase()]
+              ? (prop.away?.toUpperCase()===prop.team?.toUpperCase() ? prop.home : prop.away)
+              : (prop.away?.toUpperCase()===prop.team?.toUpperCase() ? prop.home : prop.away);
+            const dvpTeams = await fetchDvpForScoring(position);
+            const dvp = getEdgeDvpMatchup(dvpTeams, opponent, statType);
+            // Weighted matchup: blend L5/L10/L20 opp allowed
+            const oppAllowed = (dvp.l5&&dvp.l10&&dvp.l20)
+              ? dvp.l5*0.5 + dvp.l10*0.3 + dvp.l20*0.2
+              : dvp.l5 || dvp.l10 || dvp.l20 || null;
+            const mf = oppAllowed && dvp.leagueAvg
+              ? computeMatchupFactors(oppAllowed, dvp.leagueAvg)
+              : {matchupMeanFactor:1, matchupVarFactor:1};
+
+            const model = buildGameLogModel({logs:validLogs, h2hLogs:[], statType, projMin:0, useRecency:true, decayStrength:0.12,
+              l5OppAllowed:dvp.l5||"", l10OppAllowed:dvp.l10||"", l20OppAllowed:dvp.l20||"", leagueAvgAllowed:dvp.leagueAvg||""});
+            const sim   = runMonteCarlo({meanRate:model.blendedRate, sdRate:model.sdRate, meanMin:model.pMin, sdMin:model.sdMin||model.pMin*0.12, projMin:model.pMin, matchupFactor:model.matchupFactor||1, iters:3000});
             const ss    = calcSimStats(sim.outcomes, prop.line);
             const proj  = +(model.projection).toFixed(1);
             const diffPct = prop.line > 0 ? ((proj-prop.line)/prop.line)*100 : 0;
@@ -3506,13 +3551,19 @@ export default function App(){
                         if (!validLogs.length) continue;
                         const prop = playerProps.find(p=>p.statType===statType);
                         if (!prop) continue;
-                        const model = buildGameLogModel({logs:validLogs,h2hLogs:[],statType,projMin:0,useRecency:true,decayStrength:0.12});
-                        const sim   = runMonteCarlo({meanRate:model.blendedRate,sdRate:model.sdRate,meanMin:model.pMin,sdMin:model.sdMin||model.pMin*0.12,projMin:model.pMin,matchupFactor:1,iters:3000});
-                        const ss    = calcSimStats(sim.outcomes,prop.line);
-                        const proj  = +(model.projection).toFixed(1);
-                        const diffPct = prop.line>0?((proj-prop.line)/prop.line)*100:0;
-                        const score = getEdgeScore({diffPct,overPct:ss.overPct,boomPct:ss.boomPct||0,bustPct:ss.bustPct||0,minuteStability:model.minuteStability??0.7,statType});
-                        newScores[`${playerName}|${statType}`] = {score,proj,diffPct:+diffPct.toFixed(1),overPct:+ss.overPct.toFixed(1)};
+                        const position2 = prop.position || "PG";
+                        const opp2 = (prop.away?.toUpperCase()===prop.team?.toUpperCase()) ? prop.home : prop.away;
+                        const dvpTeams2 = await fetchDvpForScoring(position2);
+                        const dvp2 = getEdgeDvpMatchup(dvpTeams2, opp2, statType);
+                        const oppAllowed2 = (dvp2.l5&&dvp2.l10&&dvp2.l20)?dvp2.l5*0.5+dvp2.l10*0.3+dvp2.l20*0.2:dvp2.l5||dvp2.l10||dvp2.l20||null;
+                        const model2 = buildGameLogModel({logs:validLogs,h2hLogs:[],statType,projMin:0,useRecency:true,decayStrength:0.12,
+                          l5OppAllowed:dvp2.l5||"",l10OppAllowed:dvp2.l10||"",l20OppAllowed:dvp2.l20||"",leagueAvgAllowed:dvp2.leagueAvg||""});
+                        const sim2  = runMonteCarlo({meanRate:model2.blendedRate,sdRate:model2.sdRate,meanMin:model2.pMin,sdMin:model2.sdMin||model2.pMin*0.12,projMin:model2.pMin,matchupFactor:model2.matchupFactor||1,iters:3000});
+                        const ss2   = calcSimStats(sim2.outcomes,prop.line);
+                        const proj2 = +(model2.projection).toFixed(1);
+                        const diffPct2 = prop.line>0?((proj2-prop.line)/prop.line)*100:0;
+                        const score2 = getEdgeScore({diffPct:diffPct2,overPct:ss2.overPct,boomPct:ss2.boomPct||0,bustPct:ss2.bustPct||0,minuteStability:model2.minuteStability??0.7,statType});
+                        newScores[`${playerName}|${statType}`] = {score:score2,proj:proj2,diffPct:+diffPct2.toFixed(1),overPct:+ss2.overPct.toFixed(1)};
                       } catch {}
                     }
                     setEdgeScores(prev=>({...prev,...newScores}));
