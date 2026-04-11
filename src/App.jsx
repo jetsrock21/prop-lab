@@ -2081,8 +2081,9 @@ function EdgeFinder({
       const r = await fetch(`${apiBase}/edge/schedule?gameDate=${date}`);
       if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail||`HTTP ${r.status}`); }
       const data = await r.json();
-      setGames(Array.isArray(data) ? data : []);
-      if (!data?.length) setGamesErr("No games found for this date.");
+      const gameList = Array.isArray(data) ? data : [];
+      setGames(gameList);
+      if (!gameList.length) setGamesErr("No games found for this date.");
     } catch(e) { setGamesErr(e.message||"Failed to load schedule"); }
     finally { setGamesLoad(false); }
   };
@@ -2092,10 +2093,45 @@ function EdgeFinder({
     if (!games.length && !gamesLoad) loadGames(gameDate);
   }, []);
 
-  // Load all game props when games list first arrives
+  // Load cached games+props+scores from server on mount / date change
+  useEffect(() => {
+    const loadCached = async () => {
+      try {
+        // Load games+props cache
+        const pr = await fetch(`${apiBase}/edge/props-cache/${gameDate}`);
+        if (pr.ok) {
+          const pd = await pr.json();
+          if (pd.games?.length > 0) {
+            setGames(pd.games);
+            // Restore props from cache
+            const allP = [];
+            const cache = {};
+            for (const [gid, props] of Object.entries(pd.props||{})) {
+              cache[gid] = props;
+              allP.push(...props);
+              setLoadedGames(prev => new Set([...prev, gid]));
+            }
+            setPropCache(cache);
+            setAllProps(allP.sort((a,b)=>b.line-a.line));
+          }
+        }
+        // Load scores cache
+        const sr = await fetch(`${apiBase}/edge/scores/${gameDate}`);
+        if (sr.ok) {
+          const sd = await sr.json();
+          if (sd.scores && Object.keys(sd.scores).length > 0) {
+            setEdgeScores(prev => ({...sd.scores, ...prev}));
+          }
+        }
+      } catch {}
+    };
+    loadCached();
+  }, [gameDate]);
+
+  // Load all game props when games list first arrives (skip if already loaded from server cache)
   useEffect(() => {
     if (!games.length) return;
-    if (allProps.length > 0) return; // already loaded
+    if (allProps.length > 0) return; // already loaded from cache or previous fetch
     const fetchAll = async () => {
       setLoading(true);
       const newCache = {...propCache};
@@ -2120,8 +2156,18 @@ function EdgeFinder({
           setLoadedGames(prev => new Set([...prev, game.gameID]));
         } catch {}
       }
-      setAllProps([...allP].sort((a,b) => b.line - a.line));
+      const finalProps = [...allP].sort((a,b) => b.line - a.line);
+      setAllProps(finalProps);
       setLoading(false);
+
+      // Save games+props to server cache
+      try {
+        await fetch(`${apiBase}/edge/props-cache/${gameDate}`, {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({games, props: newCache}),
+        });
+      } catch {}
     };
     fetchAll();
   }, [games]);
@@ -2190,7 +2236,16 @@ function EdgeFinder({
           } catch {}
         }
 
-        setEdgeScores(prev => ({...prev, ...newScores}));
+        setEdgeScores(prev => {
+          const merged = {...prev, ...newScores};
+          // Save to server in background
+          fetch(`${apiBase}/edge/scores/${gameDate}`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({scores: merged}),
+          }).catch(()=>{});
+          return merged;
+        });
       } catch {}
       // 1.5s between players to respect bbref rate limits
       await new Promise(r => setTimeout(r, 1500));
@@ -3566,7 +3621,15 @@ export default function App(){
                         newScores[`${playerName}|${statType}`] = {score:score2,proj:proj2,diffPct:+diffPct2.toFixed(1),overPct:+ss2.overPct.toFixed(1)};
                       } catch {}
                     }
-                    setEdgeScores(prev=>({...prev,...newScores}));
+                    setEdgeScores(prev=>{
+                      const merged = {...prev,...newScores};
+                      fetch(`${API_BASE}/edge/scores/${edgeDate}`, {
+                        method:"POST",
+                        headers:{"Content-Type":"application/json"},
+                        body:JSON.stringify({scores:merged}),
+                      }).catch(()=>{});
+                      return merged;
+                    });
                   } catch {}
                   await new Promise(r=>setTimeout(r,1500));
                 }
