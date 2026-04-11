@@ -14,7 +14,7 @@ import asyncio
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from nba_api.stats.static import players as nba_players
 
@@ -1210,6 +1210,64 @@ async def clear_edge_cache():
     _tank01_id_cache.clear()
     _gamelog_cache.clear()
     return {"cleared": True, "note": "gamelog cache cleared — margins will re-parse on next load"}
+
+
+# ── Edge Score Cache (server-side, survives client refresh) ─────
+_edge_score_cache: dict = {}   # gameDate → {scores: {...}, updated: timestamp}
+
+
+# ── Edge Games + Props Cache ─────────────────────────────────────
+_edge_props_cache: dict = {}   # gameDate → {games: [...], props: {...gameID: [...]}, updated: ts}
+
+
+@app.get("/edge/props-cache/{game_date}")
+async def get_props_cache(game_date: str):
+    """Get cached games + props for a date."""
+    cached = _edge_props_cache.get(game_date)
+    if not cached:
+        return {"games": [], "props": {}, "updated": None}
+    return cached
+
+
+@app.post("/edge/props-cache/{game_date}")
+async def save_props_cache(game_date: str, request: Request):
+    """Save games + props for a date."""
+    import time
+    try:
+        body = await request.json()
+        _edge_props_cache[game_date] = {
+            "games":   body.get("games", []),
+            "props":   body.get("props", {}),
+            "updated": time.time(),
+        }
+        return {"saved": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/edge/scores/{game_date}")
+async def get_edge_scores(game_date: str):
+    """Get cached edge scores for a date."""
+    cached = _edge_score_cache.get(game_date)
+    if not cached:
+        return {"scores": {}, "updated": None}
+    return cached
+
+
+@app.post("/edge/scores/{game_date}")
+async def save_edge_scores(game_date: str, request: Request):
+    """Save edge scores for a date."""
+    import time
+    try:
+        body = await request.json()
+        scores = body.get("scores", {})
+        _edge_score_cache[game_date] = {
+            "scores":  scores,
+            "updated": time.time(),
+        }
+        return {"saved": True, "count": len(scores)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/edge/positions")
